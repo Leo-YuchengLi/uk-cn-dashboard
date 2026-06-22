@@ -1,0 +1,94 @@
+{
+  "name": "uk-cn-dashboard",
+  "version": "1.0.0",
+  "description": "UK-CN Airline Weekly Report Dashboard - Air China competitive intelligence",
+  "main": "electron/main.js",
+  "scripts": {
+    "dev": "concurrently \"python3 python/api_server.py\" \"vite\"",
+    "dev:vite": "vite",
+    "build": "vite build",
+    "electron:dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
+    "electron:build": "vite build && electron-builder",
+    "electron:build:win": "vite build && electron-builder --win",
+    "electron:build:mac": "vite build && electron-builder --mac",
+    "electron:build:all": "vite build && electron-builder --mac --win",
+    "postinstall": "electron-builder install-app-deps",
+    "parse": "python3 python/parser.py"
+  },
+  "dependencies": {
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "react-router-dom": "^7.6.2",
+    "echarts": "^5.6.0",
+    "echarts-for-react": "^3.0.2",
+    "better-sqlite3": "^11.9.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.5.2",
+    "vite": "^6.3.5",
+    "concurrently": "^9.1.2",
+    "wait-on": "^8.0.3",
+    "electron": "^35.2.1",
+    "electron-builder": "^26.0.12",
+    "@types/react": "^19.1.6",
+    "@types/react-dom": "^19.1.6"
+  },
+  "build": {
+    "appId": "com.ukca.dashboard",
+    "productName": "UK-CN航线周报看板",
+    "directories": {
+      "output": "release"
+    },
+    "extraResources": [
+      {
+        "from": "dist-bin",
+        "to": "app-resources/bin",
+        "filter": ["**/*"]
+      },
+      {
+        "from": "python",
+        "to": "app-resources/python",
+        "filter": ["**/*.py"]
+      },
+      {
+        "from": "public",
+        "to": "app-resources/public",
+        "filter": ["**/*"]
+      },
+      {
+        "from": "build",
+        "to": "app-resources/build",
+        "filter": ["**/*"]
+      },
+      {
+        "from": "requirements.txt",
+        "to": "app-resources/requirements.txt"
+      }
+    ],
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "!node_modules/**/*.md",
+      "!node_modules/**/*.map"
+    ],
+    "mac": {
+      "category": "public.app-category.business",
+      "icon": "build/icon.icns",
+      "target": [
+        { "target": "dmg", "arch": ["x64", "arm64"] }
+      ]
+    },
+    "win": {
+      "icon": "public/app-icon.jpg",
+      "target": [
+        { "target": "nsis", "arch": ["x64"] }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "public/app-icon.jpg",
+      "uninstallerIcon": "public/app-icon.jpg"
+    }
+  }
+}
