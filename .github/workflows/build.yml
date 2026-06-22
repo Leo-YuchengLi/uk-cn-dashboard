@@ -6,6 +6,9 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
 jobs:
   build-windows:
     runs-on: windows-latest
@@ -34,9 +37,7 @@ jobs:
         run: npm install
 
       - name: Build Vite + Electron
-        run: npm run electron:build:win
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx vite build && npx electron-builder --win --publish never
 
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
@@ -93,9 +94,7 @@ jobs:
         run: npm install
 
       - name: Build Vite + Electron
-        run: npm run electron:build:mac
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx vite build && npx electron-builder --mac --publish never
 
       - name: Upload Mac artifacts
         uses: actions/upload-artifact@v4
