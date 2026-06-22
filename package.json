@@ -79,7 +79,7 @@
       ]
     },
     "win": {
-      "icon": "public/app-icon.jpg",
+      "icon": "public/app-icon.png",
       "target": [
         { "target": "nsis", "arch": ["x64"] }
       ]
@@ -87,8 +87,8 @@
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
-      "installerIcon": "public/app-icon.jpg",
-      "uninstallerIcon": "public/app-icon.jpg"
+      "installerIcon": "public/app-icon.png",
+      "uninstallerIcon": "public/app-icon.png"
     }
   }
 }

@@ -20,7 +20,7 @@ if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR, { recursive: true })
 
 // Set dock icon on macOS
 if (process.platform === 'darwin') {
-  const iconPath = path.join(RESOURCES, 'public', 'app-icon.jpg')
+  const iconPath = path.join(RESOURCES, 'public', 'app-icon.png')
   if (fs.existsSync(iconPath)) app.dock?.setIcon(iconPath)
 }
 
