@@ -86,9 +86,7 @@
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
-      "installerIcon": "public/app-icon.png",
-      "uninstallerIcon": "public/app-icon.png"
+      "allowToChangeInstallationDirectory": true
     }
   }
 }
