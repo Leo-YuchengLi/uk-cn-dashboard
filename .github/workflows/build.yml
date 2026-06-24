@@ -30,7 +30,6 @@ jobs:
           pip install pyinstaller pandas openpyxl python-calamine
           mkdir dist-bin
           pyinstaller --onefile --name parser-bin --distpath dist-bin python/parser.py
-          pyinstaller --onefile --name sheet-parser-bin --distpath dist-bin python/sheet_parser.py
           dir dist-bin
 
       - name: Install Node deps
@@ -73,7 +72,6 @@ jobs:
           pip install pyinstaller pandas openpyxl python-calamine
           mkdir -p dist-bin
           pyinstaller --onefile --name parser-bin --distpath dist-bin python/parser.py
-          pyinstaller --onefile --name sheet-parser-bin --distpath dist-bin python/sheet_parser.py
 
       - name: Generate macOS icon
         run: |
@@ -130,7 +128,6 @@ jobs:
           pip install pyinstaller pandas openpyxl python-calamine
           mkdir -p dist-bin
           pyinstaller --onefile --name parser-bin --distpath dist-bin python/parser.py
-          pyinstaller --onefile --name sheet-parser-bin --distpath dist-bin python/sheet_parser.py
 
       - name: Generate macOS icon
         run: |
