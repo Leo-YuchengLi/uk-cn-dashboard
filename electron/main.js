@@ -145,29 +145,23 @@ function findBinary(name) {
 // ─── IPC: Import Excel ───
 
 ipcMain.handle('import:excel', async (event, geminiKey) => {
-  // Check for compiled binaries independently
+  // Check for compiled binaries
   const parserBin = findBinary('parser-bin')
   const sheetBin = findBinary('sheet-parser-bin')
 
-  // sheet_parser.py always needs Python (it calls Gemini API, no binary)
-  // parser.py can use binary OR Python
+  // Only need Python if binaries are missing
   let pythonCmd = null
   if (!parserBin || !sheetBin) {
     pythonCmd = await findPython()
-    if (!pythonCmd && !parserBin) {
-      return {
-        ok: false,
-        error: '未检测到解析器。\n\n' +
-          '请安装 Python 3.9+ (https://www.python.org/downloads/)\n' +
-          '然后运行: pip install openpyxl',
-      }
-    }
-    // sheet_parser always needs Python for Gemini API calls
     if (!pythonCmd) {
+      const missing = []
+      if (!parserBin) missing.push('parser-bin')
+      if (!sheetBin) missing.push('sheet-parser-bin')
       return {
         ok: false,
-        error: '需要 Python 环境来运行 AI 解析。\n\n' +
+        error: `未检测到解析器 (${missing.join(', ')})。\n\n` +
           '请安装 Python 3.9+ (https://www.python.org/downloads/)\n' +
+          '安装时务必勾选 "Add Python to PATH"\n' +
           '然后运行: pip install openpyxl',
       }
     }
@@ -234,9 +228,9 @@ ipcMain.handle('import:excel', async (event, geminiKey) => {
   const mainResult = await runStep(parserBin, 'parser.py')
   if (!mainResult.ok) return mainResult
 
-  // Step 2: Run sheet parser (always Python — it calls Gemini API)
+  // Step 2: Run sheet parser (binary or Python — calls Gemini API)
   mainWindow.webContents.send('import:progress', '\n[Sheet Parser] AI parsing pivot tables...\n')
-  const sheetResult = await runStep(null, 'sheet_parser.py')
+  const sheetResult = await runStep(sheetBin, 'sheet_parser.py')
   if (!sheetResult.ok) {
     mainWindow.webContents.send('import:progress', '\n❌ Sheet parser failed: ' + sheetResult.error)
   }
