@@ -15,13 +15,15 @@ export default function Overview({ snapshot }) {
 
   if (!data) return <div className="loading">{t('loading')}</div>
 
-  const { share, triptype, triptype_total, triptype_detail } = data
+  const { share = [], triptype = [], triptype_total, triptype_detail } = data
   const airlines = share.filter(s => s.airline !== 'TOTAL')
   const total = share.find(s => s.airline === 'TOTAL')
   const ca = share.find(s => s.airline === 'CA')
 
-  const months = ['MAY', 'JUNE', 'JULY', 'AUG', 'SEP', 'OCT']
-  const monthsCurr = ['JUNE', 'JULY', 'AUG', 'SEP', 'OCT', 'NOV']
+  // Dynamically detect month names from share data keys
+  const sampleAirline = share[0] || {}
+  const months = Object.keys(sampleAirline).filter(k => k.startsWith('share_') && k !== 'share_TTL').map(k => k.replace('share_', ''))
+  const monthsCurr = Object.keys(sampleAirline).filter(k => k.startsWith('curr_') && k !== 'curr_TTL').map(k => k.replace('curr_', ''))
 
   // ─── KPI Cards ───
   const caShareTTL = ca?.share_TTL || 0
@@ -50,7 +52,7 @@ export default function Overview({ snapshot }) {
       itemStyle: { color: getAirlineColor(a.airline) },
       symbol: a.airline === 'CA' ? 'circle' : 'none',
       symbolSize: a.airline === 'CA' ? 6 : 0,
-      data: months.map(m => +(a[`share_${m}`] * 100).toFixed(1)),
+      data: months.map(m => +((a[`share_${m}`] || 0) * 100).toFixed(1)),
     })),
   }
 

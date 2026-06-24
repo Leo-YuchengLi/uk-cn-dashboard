@@ -15,10 +15,11 @@ export default function Trend({ snapshot }) {
 
   if (!data) return <div className="loading">{t('loading')}</div>
 
-  const { share } = data
+  const { share = [] } = data
   const airlines = share.filter(s => s.airline !== 'TOTAL')
   const total = share.find(s => s.airline === 'TOTAL')
-  const monthsCurr = ['JUNE', 'JULY', 'AUG', 'SEP', 'OCT', 'NOV']
+  const sampleAirline = share[0] || {}
+  const monthsCurr = Object.keys(sampleAirline).filter(k => k.startsWith('curr_') && k !== 'curr_TTL').map(k => k.replace('curr_', ''))
 
   // Monthly WoW bar chart for each airline
   const wowBarOption = {

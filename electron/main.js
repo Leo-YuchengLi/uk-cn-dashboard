@@ -232,7 +232,7 @@ ipcMain.handle('import:excel', async (event, geminiKey) => {
   mainWindow.webContents.send('import:progress', '\n[Sheet Parser] AI parsing pivot tables...\n')
   const sheetResult = await runStep(sheetBin, 'sheet_parser.py')
   if (!sheetResult.ok) {
-    mainWindow.webContents.send('import:progress', '\n❌ Sheet parser failed: ' + sheetResult.error)
+    return { ok: false, error: 'Sheet parser failed:\n' + sheetResult.error }
   }
 
   return mainResult
