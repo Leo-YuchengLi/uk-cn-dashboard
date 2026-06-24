@@ -13,6 +13,12 @@ import time
 from pathlib import Path
 from datetime import datetime
 
+# Fix Windows GBK encoding crash
+if sys.stdout.encoding != 'utf-8':
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if sys.stderr.encoding != 'utf-8':
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
 import pandas as pd
 import openpyxl
 
@@ -563,7 +569,7 @@ def parse_excel(filepath, db_path=None, uk_cn_only=True):
     if len(unclassified) > 0:
         unc_agencies = unclassified.groupby(['agency_no_str', 'Travel Agency Name'])['Pax'].sum()
         unc_agencies = unc_agencies.sort_values(ascending=False).head(20)
-        print(f"\n   ⚠ Top unclassified 分销 agencies ({len(unclassified)} rows):", flush=True)
+        print(f"\n   [!] Top unclassified agencies ({len(unclassified)} rows):", flush=True)
         for (ano, aname), pax in unc_agencies.items():
             print(f"     {ano} | {aname} | {pax:,} Pax", flush=True)
 

@@ -102,7 +102,7 @@ function Dashboard() {
       <aside className="sidebar">
         <div className="sidebar-logo">
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <img src="/app-icon.png" alt="" style={{ width: 36, height: 36, borderRadius: 8 }} />
+            <img src="./app-icon.png" alt="" style={{ width: 36, height: 36, borderRadius: 8 }} />
             <div>
               <h1>{t('app_title')}</h1>
               <div className="subtitle">{t('app_subtitle')}</div>

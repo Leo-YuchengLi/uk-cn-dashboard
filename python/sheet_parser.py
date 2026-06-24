@@ -8,6 +8,12 @@ import sys
 import os
 import re
 import json
+
+# Fix Windows GBK encoding crash
+if sys.stdout.encoding != 'utf-8':
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if sys.stderr.encoding != 'utf-8':
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 import sqlite3
 import time
 from pathlib import Path
