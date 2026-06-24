@@ -152,6 +152,27 @@ function Dashboard() {
                 </option>
               ))}
             </select>
+            <button
+              onClick={async () => {
+                if (!currentSnapshot || !window.api) return
+                const yes = confirm(lang === 'zh'
+                  ? `确定删除快照 ${currentSnapshot} 的所有数据？此操作不可撤销。`
+                  : `Delete all data for snapshot ${currentSnapshot}? This cannot be undone.`)
+                if (!yes) return
+                const result = await window.api.deleteSnapshot(currentSnapshot)
+                if (result.ok) {
+                  await loadSnapshots()
+                  setCurrentSnapshot(null)
+                }
+              }}
+              style={{
+                width: '100%', marginTop: 6, padding: '5px', borderRadius: 4,
+                background: 'transparent', color: '#9ca3af', border: '1px solid var(--gray-700)',
+                fontSize: 11, cursor: 'pointer',
+              }}
+            >
+              {lang === 'zh' ? '删除当前快照' : 'Delete Current Snapshot'}
+            </button>
           </div>
         )}
 

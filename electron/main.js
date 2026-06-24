@@ -86,6 +86,24 @@ ipcMain.handle('db:snapshots', () => {
   }
 })
 
+ipcMain.handle('db:deleteSnapshot', (_, snapshot) => {
+  try {
+    if (!fs.existsSync(DB_PATH)) return { ok: false, error: 'No database' }
+    const db = new Database(DB_PATH)
+    const tables = ['snapshots', 'fact_citypair', 'fact_airportpair', 'fact_airline',
+                     'fact_channel', 'fact_agency', 'fact_month', 'sheet_data']
+    for (const t of tables) {
+      try {
+        db.prepare(`DELETE FROM ${t} WHERE snapshot_date = ?`).run(snapshot)
+      } catch (e) { /* table may not exist */ }
+    }
+    db.close()
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: e.message }
+  }
+})
+
 // ─── Python detection ───
 
 function findPython() {
