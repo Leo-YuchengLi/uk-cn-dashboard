@@ -111,7 +111,7 @@ def parse_sheet1(wb):
         # Current week absolute (cols 14-19)
         for mi, m in enumerate(months_current):
             val = g[r][14 + mi]
-            entry[f'curr_{m}'] = int(val) if val is not None else 0
+            entry[f'curr_{m}'] = int(val) if val is not None and isinstance(val, (int, float)) else 0
 
         # Current total (col 20)
         entry['curr_TTL'] = int(g[r][20]) if g[r][20] is not None else 0
@@ -127,7 +127,7 @@ def parse_sheet1(wb):
         # Previous week absolute (cols 23-28)
         for mi, m in enumerate(months_current):
             val = g[r][23 + mi] if len(g[r]) > 23 + mi else None
-            entry[f'prev_{m}'] = int(val) if val is not None else 0
+            entry[f'prev_{m}'] = int(val) if val is not None and isinstance(val, (int, float)) else 0
 
         # Monthly WoW changes (cols 30-35)
         for mi, m in enumerate(months_current):
@@ -220,7 +220,7 @@ def parse_sheet2(wb):
         total = 0
         for j, al in enumerate(airlines):
             val = g[r][1 + j]
-            pax = int(val) if val is not None else 0
+            pax = int(val) if val is not None and isinstance(val, (int, float)) else 0
             entry[al] = pax
             total += pax
 
@@ -260,7 +260,7 @@ def parse_sheet3(wb):
         entry = {'od': str(g[r][4])}
         for j, al in enumerate(all_airlines):
             val = g[r][5 + j]
-            entry[al] = int(val) if val is not None else 0
+            entry[al] = int(val) if val is not None and isinstance(val, (int, float)) else 0
         gt = g[r][5 + len(all_airlines)]
         entry['total'] = int(gt) if gt is not None else 0
         all_ods.append(entry)
@@ -367,103 +367,73 @@ def parse_sheet3(wb):
 # ─── Sheet 4: CONSOL ───
 
 def parse_sheet4(wb):
-    """Parse CONSOL sheet."""
+    """Parse CONSOL sheet - dynamically find sections."""
     ws = wb['CONSOL']
-    g = read_sheet_as_grid(ws, max_row=65, max_col=40)
+    g = read_sheet_as_grid(ws, max_row=65, max_col=50)
 
-    # Percentage table (right side, cols P-Y, rows 4-10)
-    # Row 2 (idx 2): header row with agent names
+    sections = find_sections(g, marker_col_start=10, marker_col_end=30)
+
     share_data = []
-    for r in range(3, 11):
-        if r >= len(g) or not g[r][15]:
-            continue
-        agent = str(g[r][15])
-        if agent in ('Grand Total', 'Agents'):
-            agent = 'TOTAL' if agent == 'Grand Total' else agent
-            if agent == 'Agents':
-                continue
-        entry = {'agent': agent}
-        for j, al in enumerate(AIRLINES[:9]):  # CA,MU,CZ,HU,ZH,HO,JD,GS,BA
-            val = g[r][16 + j]
-            entry[al] = float(val) * 100 if val is not None and isinstance(val, (int, float)) else 0
-        share_data.append(entry)
-
-    # Present week absolute (rows 14-21, cols P-Z)
     present_data = []
-    for r in range(14, 22):
-        if r >= len(g) or not g[r][15]:
-            continue
-        agent = str(g[r][15])
-        if agent in ('Grand Total', 'Agents'):
-            if agent == 'Agents':
-                continue
-            agent = 'TOTAL'
-        entry = {'agent': agent}
-        for j, al in enumerate(AIRLINES[:9] + ['total']):
-            col = 16 + j
-            val = g[r][col] if col < len(g[r]) else None
-            entry[al if al != 'total' else 'total'] = int(val) if val is not None else 0
-        present_data.append(entry)
-
-    # Weekly Comparison: rows 27-34 (0-idx: 26-33), cols P-Z
-    # Row 26: header ["Weekly Comparison", "Present Week", ...]
-    # Row 27: ["Agents", "CA", "MU", "CZ", "HU", "ZH", "HO", "JD", "GS", "BA", "Grand Total", "Agents", "CA", "MU", "CZ", ...]
-    # Row 28+: agent data, present week cols 16-24, total col 25, last week cols 27-35
-    consol_airlines = ['CA', 'MU', 'CZ', 'HU', 'ZH', 'HO', 'JD', 'GS', 'BA']
     weekly_comparison = []
-    for r in range(27, 35):
-        if r >= len(g) or not g[r][15]:
-            continue
-        agent = str(g[r][15])
-        if agent in ('Agents', 'Row Labels', 'Weekly Comparison'):
-            continue
-        if agent == 'Grand Total':
-            agent = 'TOTAL'
-        entry = {'agent': agent}
-        # Present week: cols 16-24 (CA,MU,CZ,HU,ZH,HO,JD,GS,BA)
-        for j, al in enumerate(consol_airlines):
-            val = g[r][16 + j] if len(g[r]) > 16 + j else None
-            entry[f'{al}_curr'] = int(val) if val is not None and isinstance(val, (int, float)) else 0
-        # Present total: col 25
-        val_total = g[r][25] if len(g[r]) > 25 else None
-        entry['total_curr'] = int(val_total) if val_total is not None and isinstance(val_total, (int, float)) else 0
-        # Last week: cols 27-35 (skip col 26 = agent name repeat)
-        for j, al in enumerate(consol_airlines):
-            val = g[r][27 + j] if len(g[r]) > 27 + j else None
-            entry[f'{al}_last'] = int(val) if val is not None and isinstance(val, (int, float)) else 0
-        weekly_comparison.append(entry)
 
-    # Airline summary: rows 50-60 cols P-W (0-idx: 49-59, cols 15-22)
-    # Cols: airline(15), ytd(16), share(17), current(18), past(19), share_curr(20), share_past(21), share_growth(22)
+    for sec in sections:
+        if not sec['airlines']:
+            continue
+        if sec['type'] == 'share' or (sec['type'] == 'unknown' and not share_data):
+            share_data = read_section_data(g, sec, is_pct=True)
+        elif sec['type'] in ('present',) and not present_data:
+            present_data = read_section_data(g, sec, is_pct=False)
+        elif sec['type'] == 'weekly' and not weekly_comparison:
+            # Weekly with curr + last side by side
+            r_start = sec['row'] + 1
+            col = sec['col']
+            als = sec['airlines']
+            total_col = col + 1 + len(als)
+            last_start = total_col + 2  # skip Total col + agent name repeat
+            wc = []
+            for r in range(r_start, min(r_start + 20, len(g))):
+                if r >= len(g) or not g[r] or not g[r][col]: continue
+                agent = str(g[r][col])
+                if agent in ('Agents', 'Weekly Comparison'): continue
+                if agent in ('Grand Total', 'Total'): agent = 'TOTAL'
+                nv = g[r][col + 1] if col + 1 < len(g[r] or []) else None
+                if isinstance(nv, str): continue
+                entry = {'agent': agent}
+                for j, al in enumerate(als):
+                    val = g[r][col + 1 + j] if col + 1 + j < len(g[r] or []) else None
+                    entry[f'{al}_curr'] = int(val) if val is not None and isinstance(val, (int, float)) else 0
+                t_val = g[r][total_col] if total_col < len(g[r] or []) else None
+                entry['total_curr'] = int(t_val) if t_val is not None and isinstance(t_val, (int, float)) else 0
+                for j, al in enumerate(als):
+                    val = g[r][last_start + j] if last_start + j < len(g[r] or []) else None
+                    entry[f'{al}_last'] = int(val) if val is not None and isinstance(val, (int, float)) else 0
+                wc.append(entry)
+                if entry.get("agent") == "TOTAL" or entry.get("tmc") == "TOTAL":
+                    break
+            weekly_comparison = wc
+
+    # Airline summary: search for triptype or YTD table in bottom area
     airline_summary = []
-    for r in range(49, 62):
-        if r >= len(g) or not g[r][15]:
-            continue
-        airline = str(g[r][15])
-        if airline in ('Row Labels', 'Airline', 'Dom OP Airlines'):
-            continue
-        if airline == 'Grand Total':
-            airline = 'TOTAL'
-        entry = {'airline': airline}
-        # Cols: 16=YTD, 17=YTD_share, 18=current_pax, 19=current_share, 20=past_pax, 21=past_share, 22=share_growth
-        ytd = g[r][16] if len(g[r]) > 16 else None
-        # Skip header rows where ytd is text
-        if isinstance(ytd, str) and not ytd.replace('-','').isdigit():
-            continue
-        ytd_share = g[r][17] if len(g[r]) > 17 else None
-        current = g[r][18] if len(g[r]) > 18 else None
-        curr_share = g[r][19] if len(g[r]) > 19 else None
-        past = g[r][20] if len(g[r]) > 20 else None
-        past_share = g[r][21] if len(g[r]) > 21 else None
-        share_growth = g[r][22] if len(g[r]) > 22 else None
-        entry['ytd'] = int(ytd) if ytd is not None and isinstance(ytd, (int, float)) else 0
-        entry['ytd_share'] = float(ytd_share) if ytd_share is not None and isinstance(ytd_share, (int, float)) else 0
-        entry['current'] = int(current) if current is not None and isinstance(current, (int, float)) else 0
-        entry['current_share'] = float(curr_share) if curr_share is not None and isinstance(curr_share, (int, float)) else 0
-        entry['past'] = int(past) if past is not None and isinstance(past, (int, float)) else 0
-        entry['past_share'] = float(past_share) if past_share is not None and isinstance(past_share, (int, float)) else 0
-        entry['share_growth'] = float(share_growth) if share_growth is not None and isinstance(share_growth, (int, float)) else 0
-        airline_summary.append(entry)
+    for r in range(35, min(65, len(g))):
+        if r >= len(g) or not g[r]: continue
+        # Search in col 15 area for "Row Labels"
+        for c in range(10, 20):
+            if c < len(g[r]) and g[r][c] == 'Row Labels':
+                next_col = g[r][c + 1] if c + 1 < len(g[r]) else None
+                if next_col in ('D+I', 'I+I'):
+                    for rr in range(r + 1, min(r + 15, len(g))):
+                        if rr >= len(g) or not g[rr][c]: continue
+                        al = str(g[rr][c])
+                        if al in ('TTL', 'Grand Total'): break
+                        entry = {'airline': al}
+                        for j, cn in enumerate(['D+I', 'I+I', 'P2P', 'total']):
+                            val = g[rr][c + 1 + j] if c + 1 + j < len(g[rr]) else None
+                            entry[cn] = int(val) if val is not None and isinstance(val, (int, float)) else 0
+                        airline_summary.append(entry)
+                break
+        if airline_summary:
+            break
 
     return {
         'share': share_data,
@@ -473,201 +443,323 @@ def parse_sheet4(wb):
     }
 
 
+# ─── Helper: find table sections by header markers ───
+
+def find_sections(g, marker_col_start=20, marker_col_end=45):
+    """Scan grid for 'Agents' header rows in the right-side area.
+    Returns list of {'type': ..., 'row': header_row, 'col': agent_col, 'airlines': [...]}
+    """
+    sections = []
+    for r in range(len(g)):
+        for c in range(marker_col_start, min(marker_col_end, len(g[r]) if g[r] else 0)):
+            val = g[r][c]
+            if val == 'Agents':
+                # Read airline names from this header row
+                airlines = []
+                for j in range(c + 1, min(c + 15, len(g[r]))):
+                    h = g[r][j]
+                    if h is None or h in ('Grand Total', 'Total'):
+                        break
+                    if isinstance(h, str) and len(h) <= 3 and h.isalpha():
+                        airlines.append(h)
+                # Determine section type from row above
+                section_type = 'unknown'
+                if r > 0:
+                    for cc in range(c, min(c + 5, len(g[r-1]) if g[r-1] else 0)):
+                        prev = g[r-1][cc] if g[r-1] else None
+                        if prev and isinstance(prev, str):
+                            pv = prev.strip().lower()
+                            if 'present week' in pv or 'total' == pv:
+                                section_type = 'present'
+                            elif 'weekly comparison' in pv:
+                                section_type = 'weekly'
+                            elif 'weekly share' in pv:
+                                section_type = 'weekly_share'
+                            elif 'previous' in pv or 'past' in pv:
+                                section_type = 'previous_share'
+                            break
+                # If still unknown, check if values in next row are floats (share) or ints (pax)
+                if section_type == 'unknown' and r + 1 < len(g):
+                    sample = g[r+1][c+1] if c+1 < len(g[r+1] or []) else None
+                    if isinstance(sample, float) and 0 < sample < 1:
+                        section_type = 'share'
+                    elif isinstance(sample, (int, float)) and sample > 1:
+                        section_type = 'present'
+                sections.append({'type': section_type, 'row': r, 'col': c, 'airlines': airlines})
+    return sections
+
+
+def read_section_data(g, section, is_pct=False):
+    """Read rows after a section header until Total/Grand Total row (inclusive)."""
+    data = []
+    r_start = section['row'] + 1
+    col = section['col']
+    airlines = section['airlines']
+    total_col = col + 1 + len(airlines)  # col after last airline
+
+    for r in range(r_start, min(r_start + 25, len(g))):
+        if r >= len(g) or not g[r] or not g[r][col]:
+            continue
+        agent = str(g[r][col])
+        # Skip known section markers
+        if agent in ('Agents', 'Row Labels', 'Weekly Comparison', 'Weekly Share',
+                      'Current Week Share', 'Past Week Share', 'Growth weekly',
+                      'Previous Week Share', 'PRESENT WEEK', 'PREVIOUS'):
+            continue
+        is_total = agent in ('Total', 'Grand Total', 'TOTAL')
+        if is_total:
+            agent = 'TOTAL'
+
+        # Skip if next cell is text (sub-header)
+        next_val = g[r][col + 1] if col + 1 < len(g[r] or []) else None
+        if isinstance(next_val, str) and next_val in airlines:
+            continue
+
+        entry = {'agent': agent}
+        for j, al in enumerate(airlines):
+            val = g[r][col + 1 + j] if col + 1 + j < len(g[r] or []) else None
+            if is_pct:
+                entry[al] = float(val) * 100 if val is not None and isinstance(val, (int, float)) else 0
+            else:
+                entry[al] = int(val) if val is not None and isinstance(val, (int, float)) else 0
+
+        # Total column
+        t_val = g[r][total_col] if total_col < len(g[r] or []) else None
+        if not is_pct:
+            entry['total'] = int(t_val) if t_val is not None and isinstance(t_val, (int, float)) else sum(entry.get(al, 0) for al in airlines)
+
+        data.append(entry)
+        if is_total:
+            break  # Stop after Total row, don't read into next section
+    return data
+
+
 # ─── Sheet 6: OTA ───
 
 def parse_sheet6(wb):
-    """Parse OTA sheet - agent × airline with shares."""
+    """Parse OTA sheet - dynamically find sections by header markers."""
     ws = wb['OTA']
-    g = read_sheet_as_grid(ws, max_row=85, max_col=45)
+    g = read_sheet_as_grid(ws, max_row=85, max_col=55)
 
-    # Share table (right side, cols AC-AI, rows 5-12)
-    ota_airlines = ['CA', 'MU', 'CZ', 'HU', 'ZH', 'HO']
+    sections = find_sections(g, marker_col_start=20, marker_col_end=45)
+
     share_data = []
-    for r in range(4, 12):
-        if r >= len(g) or not g[r][28]:
-            continue
-        agent = str(g[r][28])
-        if agent in ('Agents', 'Total'):
-            continue
-        entry = {'agent': agent}
-        for j, al in enumerate(ota_airlines):
-            val = g[r][29 + j]
-            entry[al] = float(val) * 100 if val is not None and isinstance(val, (int, float)) else 0
-        share_data.append(entry)
-
-    # Present week absolute (rows 18-26, cols AC-AI)
     present_data = []
-    for r in range(17, 27):
-        if r >= len(g) or not g[r][28]:
-            continue
-        agent = str(g[r][28])
-        if agent == 'Agents':
-            continue
-        entry = {'agent': agent}
-        for j, al in enumerate(ota_airlines):
-            val = g[r][29 + j]
-            entry[al] = int(val) if val is not None else 0
-        # Total
-        total_cols = [entry.get(al, 0) for al in ota_airlines]
-        entry['total'] = sum(total_cols)
-        present_data.append(entry)
-
-    # Weekly comparison: rows 29-37 (0-idx: 28-36)
-    # Row 29 header: Agents, CA, MU, CZ, HU, ZH, HO, JD, GS, BA, Total, CA(last), MU(last), CZ(last)...
-    # 9 airlines present (cols 29-37), Total (col 38), then 9 airlines last week (cols 39-47)
-    ota_airlines_full = ['CA', 'MU', 'CZ', 'HU', 'ZH', 'HO', 'JD', 'GS', 'BA']
     weekly_comparison = []
-    for r in range(29, 38):
-        if r >= len(g) or not g[r][28]:
-            continue
-        agent = str(g[r][28])
-        if agent in ('Agents', 'Row Labels', 'Weekly Comparison'):
-            continue
-        if agent == 'Total':
-            agent = 'TOTAL'
-        entry = {'agent': agent}
-        # Present week: 9 airlines cols 29-37
-        for j, al in enumerate(ota_airlines_full):
-            val = g[r][29 + j] if len(g[r]) > 29 + j else None
-            entry[f'{al}_curr'] = int(val) if val is not None and isinstance(val, (int, float)) else 0
-        # Present total: col 38
-        val_total = g[r][38] if len(g[r]) > 38 else None
-        entry['total_curr'] = int(val_total) if val_total is not None and isinstance(val_total, (int, float)) else 0
-        # Last week: 9 airlines cols 39-47 (col 39 = agent name repeat, so skip; actual data starts at 40)
-        # Actually checking: col 39 has "E-TRAVEL AE"(agent repeat) or a number?
-        # From raw data: col 39=468(CA_last) — no agent repeat here, directly numbers
-        for j, al in enumerate(ota_airlines_full):
-            val = g[r][39 + j] if len(g[r]) > 39 + j else None
-            entry[f'{al}_last'] = int(val) if val is not None and isinstance(val, (int, float)) else 0
-        weekly_comparison.append(entry)
-
-    # Weekly share: rows 40-48 cols AC-AK (0-idx: 39-47, cols 28-36)
-    # % per agent per airline this week vs last week
     weekly_share_curr = []
-    for r in range(39, 49):
-        if r >= len(g) or not g[r][28]:
-            continue
-        agent = str(g[r][28])
-        if agent in ('Agents', 'Row Labels'):
-            continue
-        if agent == 'Total':
-            agent = 'TOTAL'
-        entry = {'agent': agent}
-        for j, al in enumerate(ota_airlines):
-            val = g[r][29 + j]
-            entry[al] = float(val) * 100 if val is not None and isinstance(val, (int, float)) else 0
-        weekly_share_curr.append(entry)
+    ota_airlines = []
 
-    # Growth weekly: row 49 cols AC-AK (0-idx: 48)
-    growth_weekly = {}
-    r = 48
-    if r < len(g) and g[r][28]:
-        label = str(g[r][28])
-        growth_weekly['label'] = label
-        for j, al in enumerate(ota_airlines):
-            val = g[r][29 + j]
-            growth_weekly[al] = float(val) * 100 if val is not None and isinstance(val, (int, float)) else 0
+    for sec in sections:
+        if not sec['airlines']:
+            continue
+        if not ota_airlines:
+            ota_airlines = sec['airlines']
 
-    # Airline summary by trip type (left side pivot): row ~75 Grand Total D+I/I+I/P2P
-    # Scan rows 70-80 for Grand Total row with trip type breakdown
-    airline_summary = []
-    for r in range(69, 85):
-        if r >= len(g) or not g[r][0]:
-            continue
-        airline = str(g[r][0])
-        if airline in ('Row Labels', ''):
-            continue
-        entry = {'airline': airline}
-        di = g[r][1] if len(g[r]) > 1 else None
-        ii = g[r][2] if len(g[r]) > 2 else None
-        p2p = g[r][3] if len(g[r]) > 3 else None
-        total = g[r][4] if len(g[r]) > 4 else None
-        entry['D+I'] = int(di) if di is not None else 0
-        entry['I+I'] = int(ii) if ii is not None else 0
-        entry['P2P'] = int(p2p) if p2p is not None else 0
-        entry['total'] = int(total) if total is not None else 0
-        airline_summary.append(entry)
+        if sec['type'] == 'share' or (sec['type'] == 'unknown' and not share_data):
+            share_data = read_section_data(g, sec, is_pct=True)
+        elif sec['type'] == 'present' and not present_data:
+            present_data = read_section_data(g, sec, is_pct=False)
+        elif sec['type'] == 'weekly':
+            # Weekly comparison: two sets of airlines side by side (curr + last)
+            raw = read_section_data(g, sec, is_pct=False)
+            # The section has airlines for current, then after Total col, same airlines for last week
+            # Re-read with extended columns
+            wc = []
+            r_start = sec['row'] + 1
+            col = sec['col']
+            als = sec['airlines']
+            total_col = col + 1 + len(als)
+            last_start = total_col + 2  # skip Total col + agent name repeat  # skip Total, then last week airlines
+
+            for r in range(r_start, min(r_start + 20, len(g))):
+                if r >= len(g) or not g[r] or not g[r][col]:
+                    continue
+                agent = str(g[r][col])
+                if agent in ('Agents', 'Weekly Comparison'):
+                    continue
+                if agent in ('Total', 'Grand Total'):
+                    agent = 'TOTAL'
+                next_val = g[r][col + 1] if col + 1 < len(g[r] or []) else None
+                if isinstance(next_val, str):
+                    continue
+
+                entry = {'agent': agent}
+                for j, al in enumerate(als):
+                    val = g[r][col + 1 + j] if col + 1 + j < len(g[r] or []) else None
+                    entry[f'{al}_curr'] = int(val) if val is not None and isinstance(val, (int, float)) else 0
+                t_val = g[r][total_col] if total_col < len(g[r] or []) else None
+                entry['total_curr'] = int(t_val) if t_val is not None and isinstance(t_val, (int, float)) else 0
+                # Last week values
+                for j, al in enumerate(als):
+                    val = g[r][last_start + j] if last_start + j < len(g[r] or []) else None
+                    entry[f'{al}_last'] = int(val) if val is not None and isinstance(val, (int, float)) else 0
+                wc.append(entry)
+                if entry.get("agent") == "TOTAL" or entry.get("tmc") == "TOTAL":
+                    break
+            weekly_comparison = wc
+        elif sec['type'] == 'weekly_share':
+            weekly_share_curr = read_section_data(g, sec, is_pct=True)
 
     return {
-        'airlines': ota_airlines,
+        'airlines': ota_airlines[:6] if ota_airlines else ['CA', 'MU', 'CZ', 'HU', 'ZH', 'HO'],
         'share': share_data,
         'present': present_data,
         'weekly_comparison': weekly_comparison,
         'weekly_share': weekly_share_curr,
-        'growth_weekly': growth_weekly,
-        'airline_summary': airline_summary,
     }
 
 
 # ─── Sheet 7: TMC ───
 
 def parse_sheet7(wb):
-    """Parse TMC sheet."""
+    """Parse TMC sheet - dynamically find sections."""
     ws = wb['TMC']
-    g = read_sheet_as_grid(ws, max_row=75, max_col=40)
+    g = read_sheet_as_grid(ws, max_row=75, max_col=45)
 
-    tmc_airlines = ['CA', 'BA', 'MU', 'CZ', 'HU', 'ZH', 'HO', 'GS']
+    # TMC uses named TMC companies instead of "Agents" as marker.
+    # Search for rows with TMC name pattern: row has a known TMC name at some col,
+    # and the row above has airline codes (CA, BA, MU...).
+    # Use find_sections but also search for "PRESENT WEEK" / TMC names
 
-    # Present week absolute (right side, rows 10-26, cols R-Z)
+    # Strategy: find header rows that contain airline codes like CA, BA, MU
+    def find_tmc_sections():
+        sections = []
+        for r in range(len(g)):
+            for c in range(8, min(30, len(g[r]) if g[r] else 0)):
+                val = g[r][c]
+                # Look for known TMC names or "PRESENT WEEK" marker
+                if val and isinstance(val, str) and val in ('PRESENT WEEK', 'PREVIOUS', 'CURRENT WEEK'):
+                    # Next row should have TMC names and airline values
+                    if r + 1 < len(g) and g[r + 1]:
+                        tmc_name = g[r + 1][c]
+                        if tmc_name and isinstance(tmc_name, str):
+                            # Read airline headers from the row with this TMC
+                            # The airlines are in the header one row before data
+                            airlines = []
+                            # Check if same row has airline names after TMC col
+                            for j in range(c + 1, min(c + 12, len(g[r + 1]) if g[r + 1] else 0)):
+                                h = g[r][j] if g[r] else None  # header row = marker row
+                                # Actually check: the marker row might have "CA", "BA", etc.
+                                pass
+
+                            # Better approach: find a row that starts with TMC names and has numbers
+                            # Look for the Agents-like header
+                            pass
+                    sections.append({'marker': val, 'row': r, 'col': c})
+        return sections
+
+    # Even simpler: use the same find_sections but search wider and for TMC-specific patterns
+    # TMC section headers use TMC company names directly, with airline cols as values
+    # Let me just scan for rows where col has a known TMC name and col+1 has a number
+
+    sections = find_sections(g, marker_col_start=8, marker_col_end=25)
+
+    # Also scan for "PRESENT WEEK" / "PREVIOUS" markers
+    present_markers = []
+    for r in range(len(g)):
+        for c in range(8, min(25, len(g[r]) if g[r] else 0)):
+            val = g[r][c]
+            if val and isinstance(val, str):
+                vl = val.strip()
+                if vl in ('PRESENT WEEK', 'CURRENT WEEK'):
+                    present_markers.append({'type': 'present_header', 'row': r, 'col': c})
+                elif vl == 'PREVIOUS':
+                    present_markers.append({'type': 'previous_header', 'row': r, 'col': c})
+
     present_data = []
-    for r in range(9, 27):
-        if r >= len(g) or not g[r][17]:
-            continue
-        tmc = str(g[r][17])
-        if tmc in ('PRESENT WEEK', 'Grand Total'):
-            if tmc == 'Grand Total':
-                tmc = 'TOTAL'
-            else:
-                continue
-        entry = {'tmc': tmc}
-        for j, al in enumerate(tmc_airlines):
-            val = g[r][18 + j]
-            entry[al] = int(val) if val is not None else 0
-        gt = g[r][26] if len(g[r]) > 26 else None
-        entry['total'] = int(gt) if gt is not None else sum(entry.get(al, 0) for al in tmc_airlines)
-        present_data.append(entry)
-
-    # Share table (rows 30-42, cols R-Y)
     share_data = []
-    for r in range(29, 43):
-        if r >= len(g) or not g[r][17]:
-            continue
-        tmc = str(g[r][17])
-        if tmc in ('PRESENT WEEK', 'Grand Total'):
-            continue
-        entry = {'tmc': tmc}
-        for j, al in enumerate(tmc_airlines):
-            val = g[r][18 + j]
-            entry[al] = float(val) * 100 if val is not None and isinstance(val, (int, float)) else 0
-        share_data.append(entry)
-
-    # Current week per TMC: rows 49-60+ cols R-Z (0-idx: 48-60+, cols 17-25)
-    # Separate weekly breakdown section
     weekly_comparison = []
-    for r in range(48, 68):
-        if r >= len(g) or not g[r][17]:
+    tmc_airlines = []
+
+    # Use find_sections results if available
+    for sec in sections:
+        if not sec['airlines']:
             continue
-        tmc = str(g[r][17])
-        if tmc in ('PRESENT WEEK', 'PREVIOUS', 'CURRENT WEEK', 'Row Labels', 'TMC'):
-            continue
-        # Skip header rows where next cell is a string (airline name)
-        next_val = g[r][18] if len(g[r]) > 18 else None
-        if isinstance(next_val, str):
-            continue
-        if tmc == 'Grand Total':
-            tmc = 'TOTAL'
-        entry = {'tmc': tmc}
-        for j, al in enumerate(tmc_airlines):
-            col = 18 + j
-            val = g[r][col] if col < len(g[r]) else None
-            entry[al] = int(val) if val is not None and isinstance(val, (int, float)) else 0
-        gt_col = 18 + len(tmc_airlines)
-        gt = g[r][gt_col] if gt_col < len(g[r]) else None
-        entry['total'] = int(gt) if gt is not None else sum(entry.get(al, 0) for al in tmc_airlines)
-        weekly_comparison.append(entry)
+        if not tmc_airlines:
+            tmc_airlines = sec['airlines']
+
+        # Rename 'agent' key to 'tmc' in results
+        if sec['type'] == 'share' or (sec['type'] == 'unknown' and not share_data):
+            raw = read_section_data(g, sec, is_pct=True)
+            share_data = [{'tmc': d.pop('agent'), **d} for d in raw]
+        elif sec['type'] == 'present' and not present_data:
+            raw = read_section_data(g, sec, is_pct=False)
+            present_data = [{'tmc': d.pop('agent'), **d} for d in raw]
+        elif sec['type'] == 'weekly' and not weekly_comparison:
+            r_start = sec['row'] + 1
+            col = sec['col']
+            als = sec['airlines']
+            total_col = col + 1 + len(als)
+            last_start = total_col + 2  # skip Total col + agent name repeat
+            wc = []
+            for r in range(r_start, min(r_start + 20, len(g))):
+                if r >= len(g) or not g[r] or not g[r][col]: continue
+                tmc = str(g[r][col])
+                if tmc in ('Agents', 'Weekly Comparison', 'PRESENT WEEK', 'PREVIOUS'): continue
+                if tmc in ('Grand Total', 'Total'): tmc = 'TOTAL'
+                nv = g[r][col + 1] if col + 1 < len(g[r] or []) else None
+                if isinstance(nv, str): continue
+                entry = {'tmc': tmc}
+                for j, al in enumerate(als):
+                    val = g[r][col + 1 + j] if col + 1 + j < len(g[r] or []) else None
+                    entry[al] = int(val) if val is not None and isinstance(val, (int, float)) else 0
+                t_val = g[r][total_col] if total_col < len(g[r] or []) else None
+                entry['total'] = int(t_val) if t_val is not None and isinstance(t_val, (int, float)) else 0
+                wc.append(entry)
+                if entry.get("agent") == "TOTAL" or entry.get("tmc") == "TOTAL":
+                    break
+            weekly_comparison = wc
+
+    # If find_sections didn't find TMC data (different structure),
+    # try present_markers approach
+    if not present_data and present_markers:
+        for pm in present_markers:
+            if pm['type'] == 'present_header':
+                r = pm['row']
+                c = pm['col']
+                # The TMC names are at col c, airlines at col c+1 onwards
+                # Read row r to find TMC name and next row for data
+                # Actually: marker row has TMC names listed vertically below
+                # and airline values horizontally
+                # Read the next rows as TMC data
+                als = []
+                # Find airline header - usually same row as PRESENT WEEK or one below
+                for rr in range(r, min(r + 2, len(g))):
+                    for j in range(c + 1, min(c + 12, len(g[rr]) if g[rr] else 0)):
+                        h = g[rr][j]
+                        if h and isinstance(h, str) and len(h) <= 3 and h.isalpha() and h.isupper():
+                            als.append(h)
+                    if als:
+                        break
+
+                if not als:
+                    continue
+                if not tmc_airlines:
+                    tmc_airlines = als
+
+                # Read TMC rows: col c = TMC name, col c+1..c+n = airline values
+                for rr in range(r + 1, min(r + 25, len(g))):
+                    if rr >= len(g) or not g[rr] or not g[rr][c]: continue
+                    tmc = str(g[rr][c])
+                    if tmc in ('PRESENT WEEK', 'PREVIOUS', 'CURRENT WEEK'): continue
+                    if tmc == 'Grand Total':
+                        tmc = 'TOTAL'
+                    nv = g[rr][c + 1] if c + 1 < len(g[rr] or []) else None
+                    if isinstance(nv, str) and nv in als:
+                        continue  # another header row
+                    entry = {'tmc': tmc}
+                    for j, al in enumerate(als):
+                        val = g[rr][c + 1 + j] if c + 1 + j < len(g[rr] or []) else None
+                        entry[al] = int(val) if val is not None and isinstance(val, (int, float)) else 0
+                    # Total
+                    tc = c + 1 + len(als)
+                    t_val = g[rr][tc] if tc < len(g[rr] or []) else None
+                    entry['total'] = int(t_val) if t_val is not None and isinstance(t_val, (int, float)) else sum(entry.get(al, 0) for al in als)
+                    present_data.append(entry)
+                break
 
     return {
-        'airlines': tmc_airlines,
+        'airlines': tmc_airlines if tmc_airlines else ['CA', 'BA', 'MU', 'CZ', 'HU', 'ZH', 'HO', 'GS'],
         'present': present_data,
         'share': share_data,
         'weekly_comparison': weekly_comparison,
@@ -694,7 +786,7 @@ def parse_sheet8(wb):
         entry = {'country': country}
         for j, al in enumerate(trip_airlines):
             val = g[r][1 + j]
-            entry[al] = int(val) if val is not None else 0
+            entry[al] = int(val) if val is not None and isinstance(val, (int, float)) else 0
         gt = g[r][10] if len(g[r]) > 10 else None
         entry['total'] = int(gt) if gt is not None else 0
         countries.append(entry)

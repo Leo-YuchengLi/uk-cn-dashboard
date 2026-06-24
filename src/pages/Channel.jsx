@@ -241,6 +241,51 @@ function WeeklyComparison({ title, data, nameKey, airlines, t }) {
 
 function AirlineSummary({ title, data, t }) {
   if (!data || data.length === 0) return null
+
+  // Auto-detect format: D+I/I+I/P2P vs YTD/Current/Past
+  const hasTripType = data[0] && ('D+I' in data[0])
+  const grandTotal = data.reduce((s, a) => s + (a.total || 0), 0)
+
+  if (hasTripType) {
+    return (
+      <div className="chart-card" style={{ marginBottom: 20 }}>
+        <div className="chart-title">{title}</div>
+        <table className="matrix-table">
+          <thead>
+            <tr>
+              <th className="row-header">{t('col_airline')}</th>
+              <th>D+I</th>
+              <th>I+I</th>
+              <th>P2P</th>
+              <th>{t('col_total')}</th>
+              <th>{t('col_share')}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {data.map((a, i) => (
+              <tr key={i} style={{
+                background: a.airline === 'CA' ? '#FFF5F5' : undefined,
+                fontWeight: a.airline === 'CA' ? 600 : 400,
+              }}>
+                <td className="row-header" style={{
+                  fontWeight: 700, color: a.airline === 'CA' ? CA_RED : undefined,
+                }}>{a.airline}</td>
+                <td>{fmtNum(a['D+I'] || 0)}</td>
+                <td>{fmtNum(a['I+I'] || 0)}</td>
+                <td>{fmtNum(a['P2P'] || 0)}</td>
+                <td style={{ fontWeight: 700 }}>{fmtNum(a.total || 0)}</td>
+                <td style={{ color: a.airline === 'CA' ? CA_RED : undefined }}>
+                  {grandTotal > 0 ? fmtPct((a.total || 0) / grandTotal * 100) : '–'}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    )
+  }
+
+  // YTD / Current / Past format
   return (
     <div className="chart-card" style={{ marginBottom: 20 }}>
       <div className="chart-title">{title}</div>
@@ -264,8 +309,7 @@ function AirlineSummary({ title, data, t }) {
               fontWeight: a.airline === 'CA' ? 600 : 400,
             }}>
               <td className="row-header" style={{
-                fontWeight: 700,
-                color: a.airline === 'CA' ? CA_RED : undefined,
+                fontWeight: 700, color: a.airline === 'CA' ? CA_RED : undefined,
               }}>{a.airline}</td>
               <td>{fmtNum(a.ytd || 0)}</td>
               <td>{fmtPct((a.ytd_share || 0) * 100)}</td>
