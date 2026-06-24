@@ -10,10 +10,12 @@ const RESOURCES = isPackaged
   ? path.join(process.resourcesPath, 'app-resources')
   : path.join(__dirname, '..')
 
-const DB_DIR = path.join(app.getPath('userData'), 'data')
+const isDev = process.env.NODE_ENV === 'development' || !isPackaged
+const DB_DIR = isDev
+  ? path.join(__dirname, '..', 'data')
+  : path.join(app.getPath('userData'), 'data')
 const DB_PATH = path.join(DB_DIR, 'airline.db')
 const PYTHON_DIR = path.join(RESOURCES, 'python')
-const isDev = process.env.NODE_ENV === 'development' || !isPackaged
 
 // Ensure data directory exists
 if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR, { recursive: true })
@@ -55,6 +57,7 @@ app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) creat
 // ─── IPC: Database queries ───
 
 function getDb() {
+  console.log('[DB] Path:', DB_PATH, 'Exists:', fs.existsSync(DB_PATH))
   if (!fs.existsSync(DB_PATH)) return null
   return new Database(DB_PATH, { readonly: true })
 }
