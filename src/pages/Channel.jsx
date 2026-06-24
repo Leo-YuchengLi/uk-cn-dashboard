@@ -133,6 +133,7 @@ function ShareTable({ title, items, nameKey, airlines, sort, setSort, t }) {
 }
 
 function StackedBar({ title, items, nameKey, airlines, sort }) {
+  if (!items || items.length === 0) return null
   const sorted = sortItems(items, sort, airlines, nameKey)
   if (sorted.length === 0) return null
 
@@ -367,7 +368,10 @@ export default function Channel({ snapshot }) {
 
   const renderConsol = () => {
     if (!consol) return <div className="loading">Loading...</div>
-    const als = ['CA', 'MU', 'CZ', 'HU', 'ZH', 'HO', 'JD', 'GS', 'BA']
+    // Detect airlines from present data or airline_summary
+    const sampleRow = (consol.present || consol.share || [])[0] || {}
+    const als = Object.keys(sampleRow).filter(k => k.length <= 3 && k === k.toUpperCase() && k !== 'total' && !['agent','tmc'].includes(k))
+    if (als.length === 0) return <div className="loading">No data</div>
     return (
       <>
         <ShareTable title={t("consol_share")} items={consol.present} nameKey="agent" airlines={als} sort={sort} setSort={setSort} t={t} />
@@ -389,8 +393,8 @@ export default function Channel({ snapshot }) {
       <>
         <ShareTable title={t("tmc_share")} items={tmc.present} nameKey="tmc" airlines={als} sort={sort} setSort={setSort} t={t} />
         <StackedBar title={t("tmc_pax")} items={tmc.present} nameKey="tmc" airlines={als} sort={sort} t={t} />
-        {tmc.weekly && (
-          <WeeklyComparison title={t("weekly_compare")} data={tmc.weekly} nameKey="tmc" airlines={als.slice(0, 6)} t={t} />
+        {(tmc.weekly_comparison || tmc.weekly) && (
+          <WeeklyComparison title={t("weekly_compare")} data={tmc.weekly_comparison || tmc.weekly} nameKey="tmc" airlines={als.slice(0, 6)} t={t} />
         )}
       </>
     )
