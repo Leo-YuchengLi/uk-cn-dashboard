@@ -53,7 +53,64 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  build-mac:
+  build-mac-x64:
+    runs-on: macos-13
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python deps & build parsers
+        run: |
+          pip install pyinstaller pandas openpyxl python-calamine
+          mkdir -p dist-bin
+          pyinstaller --onefile --name parser-bin --distpath dist-bin python/parser.py
+          pyinstaller --onefile --name sheet-parser-bin --distpath dist-bin python/sheet_parser.py
+
+      - name: Generate macOS icon
+        run: |
+          mkdir -p build
+          sips -s format png public/app-icon.png --out /tmp/icon-src.png
+          mkdir -p /tmp/icon.iconset
+          for s in 16 32 128 256 512; do
+            sips -z $s $s /tmp/icon-src.png --out /tmp/icon.iconset/icon_${s}x${s}.png
+          done
+          sips -z 32 32 /tmp/icon-src.png --out /tmp/icon.iconset/icon_16x16@2x.png
+          sips -z 64 64 /tmp/icon-src.png --out /tmp/icon.iconset/icon_32x32@2x.png
+          sips -z 256 256 /tmp/icon-src.png --out /tmp/icon.iconset/icon_128x128@2x.png
+          sips -z 512 512 /tmp/icon-src.png --out /tmp/icon.iconset/icon_256x256@2x.png
+          sips -z 1024 1024 /tmp/icon-src.png --out /tmp/icon.iconset/icon_512x512@2x.png
+          iconutil -c icns /tmp/icon.iconset -o build/icon.icns
+
+      - name: Install Node deps
+        run: npm install
+
+      - name: Build Vite + Electron (x64 only)
+        run: npx vite build && npx electron-builder --mac --x64 --publish never
+
+      - name: Upload Mac x64
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-x64-installer
+          path: release/*.dmg
+
+      - name: Upload to Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*.dmg
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-mac-arm64:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -78,7 +135,7 @@ jobs:
       - name: Generate macOS icon
         run: |
           mkdir -p build
-          sips -s format png public/app-icon.jpg --out /tmp/icon-src.png
+          sips -s format png public/app-icon.png --out /tmp/icon-src.png
           mkdir -p /tmp/icon.iconset
           for s in 16 32 128 256 512; do
             sips -z $s $s /tmp/icon-src.png --out /tmp/icon.iconset/icon_${s}x${s}.png
@@ -93,13 +150,13 @@ jobs:
       - name: Install Node deps
         run: npm install
 
-      - name: Build Vite + Electron
-        run: npx vite build && npx electron-builder --mac --publish never
+      - name: Build Vite + Electron (arm64 only)
+        run: npx vite build && npx electron-builder --mac --arm64 --publish never
 
-      - name: Upload Mac artifacts
+      - name: Upload Mac arm64
         uses: actions/upload-artifact@v4
         with:
-          name: mac-installer
+          name: mac-arm64-installer
           path: release/*.dmg
 
       - name: Upload to Release
