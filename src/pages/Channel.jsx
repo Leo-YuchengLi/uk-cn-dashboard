@@ -206,12 +206,14 @@ function WeeklyComparison({ title, data, nameKey, airlines, t }) {
             </tr>
           </thead>
           <tbody>
-            {data.filter(i => i[nameKey] !== 'Total' && i[nameKey] !== 'TOTAL').map((item, i) => {
+            {data.filter(i => i[nameKey] !== 'Total' && i[nameKey] !== 'TOTAL')
+              .sort((a, b) => (b.total_curr ?? 0) - (a.total_curr ?? 0))
+              .map((item, i) => {
               // Support both field formats: {CA: v} or {CA_curr: v, CA_last: v}
               const getCurr = (al) => item[`${al}_curr`] ?? item[al] ?? 0
               const getLast = (al) => item[`${al}_last`] ?? item[`${al}_prev`] ?? 0
-              const totalCurr = airlines.reduce((s, al) => s + getCurr(al), 0)
-              const totalLast = airlines.reduce((s, al) => s + getLast(al), 0)
+              const totalCurr = item.total_curr ?? airlines.reduce((s, al) => s + getCurr(al), 0)
+              const totalLast = item.total_last ?? airlines.reduce((s, al) => s + getLast(al), 0)
               return (
               <tr key={i}>
                 <td className="row-header" style={{ fontSize: 11 }}>

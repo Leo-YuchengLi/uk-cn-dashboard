@@ -26,6 +26,9 @@ function Dashboard() {
   const [currentSnapshot, setCurrentSnapshot] = useState(null)
   const [importing, setImporting] = useState(false)
   const [importLog, setImportLog] = useState('')
+  const [geminiKey, setGeminiKey] = useState(() => localStorage.getItem('gemini_key') || '')
+  const [showKeyInput, setShowKeyInput] = useState(false)
+  const [keyDraft, setKeyDraft] = useState('')
 
   const loadSnapshots = useCallback(async () => {
     try {
@@ -41,8 +44,19 @@ function Dashboard() {
 
   useEffect(() => { loadSnapshots() }, [loadSnapshots])
 
+  const saveGeminiKey = (key) => {
+    localStorage.setItem('gemini_key', key)
+    setGeminiKey(key)
+    setShowKeyInput(false)
+  }
+
   const handleImport = async () => {
     if (!window.api) return alert('Please run in Electron to import Excel')
+    if (!geminiKey) {
+      setKeyDraft('')
+      setShowKeyInput(true)
+      return
+    }
     setImporting(true)
     setImportLog('')
 
@@ -51,7 +65,7 @@ function Dashboard() {
     })
 
     try {
-      const result = await window.api.importExcel()
+      const result = await window.api.importExcel(geminiKey)
       if (result.ok) {
         setImportLog(prev => prev + '\n✅ Done!')
         await loadSnapshots()
@@ -177,6 +191,26 @@ function Dashboard() {
         )}
 
         <div className="sidebar-footer">
+          {/* Gemini API Key status */}
+          <div style={{ padding: '0 0 8px', fontSize: 11 }}>
+            {geminiKey ? (
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <span style={{ color: '#4ade80' }}>Gemini API Key ✓</span>
+                <button onClick={() => { setKeyDraft(''); setShowKeyInput(true) }} style={{
+                  background: 'none', border: 'none', color: '#9ca3af',
+                  fontSize: 11, cursor: 'pointer', textDecoration: 'underline',
+                }}>{lang === 'zh' ? '修改' : 'Change'}</button>
+              </div>
+            ) : (
+              <button onClick={() => { setKeyDraft(''); setShowKeyInput(true) }} style={{
+                width: '100%', padding: '6px', borderRadius: 4,
+                background: 'var(--gray-800)', color: '#fbbf24',
+                border: '1px solid var(--gray-600)', fontSize: 11,
+                cursor: 'pointer',
+              }}>{lang === 'zh' ? '设置 Gemini API Key' : 'Set Gemini API Key'}</button>
+            )}
+          </div>
+
           <button className="import-btn" onClick={handleImport} disabled={importing}>
             {importing ? t('btn_importing') : t('btn_import')}
           </button>
@@ -197,6 +231,48 @@ function Dashboard() {
           <div className="import-modal">
             <h3>{importing ? t('btn_importing') : 'Done'}</h3>
             <div className="import-log">{importLog}</div>
+          </div>
+        </div>
+      )}
+
+      {showKeyInput && (
+        <div className="import-overlay" onClick={() => setShowKeyInput(false)}>
+          <div className="import-modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 420 }}>
+            <h3 style={{ marginBottom: 8 }}>Gemini API Key</h3>
+            <p style={{ fontSize: 12, color: '#6b7280', marginBottom: 12 }}>
+              {lang === 'zh'
+                ? '导入 Excel 数据需要 Gemini API Key 进行 AI 智能解析。'
+                : 'Gemini API Key is required for AI-powered Excel data import.'}
+            </p>
+            <input
+              type="password"
+              value={keyDraft}
+              onChange={e => setKeyDraft(e.target.value)}
+              placeholder="AIza..."
+              autoFocus
+              onKeyDown={e => { if (e.key === 'Enter' && keyDraft.trim()) saveGeminiKey(keyDraft.trim()) }}
+              style={{
+                width: '100%', padding: '8px 12px', borderRadius: 6,
+                border: '1px solid #d1d5db', fontSize: 13,
+                marginBottom: 12, boxSizing: 'border-box',
+              }}
+            />
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+              <button onClick={() => setShowKeyInput(false)} style={{
+                padding: '6px 16px', borderRadius: 6, border: '1px solid #d1d5db',
+                background: 'white', cursor: 'pointer', fontSize: 12,
+              }}>{lang === 'zh' ? '取消' : 'Cancel'}</button>
+              <button onClick={() => keyDraft.trim() && saveGeminiKey(keyDraft.trim())} style={{
+                padding: '6px 16px', borderRadius: 6, border: 'none',
+                background: '#2563eb', color: 'white', cursor: 'pointer', fontSize: 12,
+              }}>{lang === 'zh' ? '保存' : 'Save'}</button>
+              {geminiKey && (
+                <button onClick={() => { localStorage.removeItem('gemini_key'); setGeminiKey(''); setShowKeyInput(false) }} style={{
+                  padding: '6px 16px', borderRadius: 6, border: '1px solid #ef4444',
+                  background: 'white', color: '#ef4444', cursor: 'pointer', fontSize: 12,
+                }}>{lang === 'zh' ? '清除' : 'Clear'}</button>
+              )}
+            </div>
           </div>
         </div>
       )}

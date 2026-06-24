@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """
-Parse pre-computed pivot table data from each Excel sheet.
-Stores structured data matching what the user sees in Excel.
+AI-powered Excel sheet parser.
+Sends raw grid data to Gemini for intelligent structure recognition,
+then stores structured JSON for the dashboard.
 """
 
 import sys
 import os
 import re
 import json
+import urllib.request
+import urllib.error
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Fix Windows GBK encoding crash
 if sys.stdout.encoding != 'utf-8':
@@ -22,7 +26,8 @@ import openpyxl
 
 
 DB_PATH = os.path.join(os.path.dirname(__file__), '..', 'data', 'airline.db')
-AIRLINES = ['CA', 'MU', 'CZ', 'HU', 'BA', 'HO', 'ZH', 'JD', 'GS', 'NZ']
+GEMINI_MODEL = 'gemini-2.5-flash'
+GEMINI_URL = f'https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent'
 
 
 def extract_snapshot_date(filepath):
@@ -42,282 +47,381 @@ def read_sheet_as_grid(ws, max_row=120, max_col=80):
     return grid
 
 
-# ─── Sheet 1: Month share - Pax ───
+# ─── Gemini API ───
 
-def parse_sheet1(wb):
-    """Parse Month share - Pax sheet."""
-    ws = wb['Month share - Pax']
-    g = read_sheet_as_grid(ws)
+def call_gemini(prompt, api_key, temperature=0):
+    """Call Gemini API and return the text response."""
+    url = f'{GEMINI_URL}?key={api_key}'
+    payload = {
+        'contents': [{'parts': [{'text': prompt}]}],
+        'generationConfig': {
+            'temperature': temperature,
+            'responseMimeType': 'application/json',
+        },
+    }
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode('utf-8'),
+        headers={'Content-Type': 'application/json'},
+        method='POST',
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=600) as resp:
+            result = json.loads(resp.read().decode('utf-8'))
+        text = result['candidates'][0]['content']['parts'][0]['text']
+        return text
+    except urllib.error.HTTPError as e:
+        body = e.read().decode('utf-8', errors='replace')
+        raise RuntimeError(f"Gemini API error {e.code}: {body}")
 
-    data = {}
 
-    # Table 1: Airlines × Trip Types (rows 7-18, 0-indexed: 6-17)
-    # Row 6: headers [Row Labels, D+I, I+I, 点点, Grand Total]
-    triptype_data = []
-    for r in range(7, 17):  # rows 8-17 (airlines)
-        if r >= len(g) or not g[r][0]:
-            continue
-        airline = g[r][0]
-        if airline == 'Grand Total':
-            continue
-        triptype_data.append({
-            'airline': str(airline),
-            'D+I': int(g[r][1] or 0),
-            'I+I': int(g[r][2] or 0),
-            'P2P': int(g[r][3] or 0),
-            'total': int(g[r][4] or 0),
-        })
-    data['triptype'] = triptype_data
-    # Grand total
-    for r in range(7, 20):
-        if r < len(g) and g[r][0] == 'Grand Total':
-            data['triptype_total'] = {
-                'D+I': int(g[r][1] or 0),
-                'I+I': int(g[r][2] or 0),
-                'P2P': int(g[r][3] or 0),
-                'total': int(g[r][4] or 0),
-            }
-            break
+def grid_to_text(grid, max_rows=None):
+    """Convert a 2D grid to a readable text table for AI consumption.
+    Uses TSV format with row numbers for precise reference.
+    """
+    # Trim trailing empty rows and cols
+    while grid and all(c is None for c in grid[-1]):
+        grid = grid[:-1]
+    if not grid:
+        return "(empty sheet)"
 
-    # Table 2: GREEN section (rows 26-35, 0-indexed: 25-34)
-    # Row 25: headers
-    # Cols F-L (5-11): SHARE by month MAY-OCT + TTL
-    # Cols N-T (13-19): Current week JUNE-NOV + TTL (col 20)
-    # Col V (21): Previous identifier
-    # Col W (22): 总计环比
-    # Cols X-AC (23-28): Previous week JUNE-NOV
-    # Col AD (29): Previous TTL
-    months_share = ['MAY', 'JUNE', 'JULY', 'AUG', 'SEP', 'OCT']
-    months_current = ['JUNE', 'JULY', 'AUG', 'SEP', 'OCT', 'NOV']
+    max_col = 0
+    for row in grid:
+        for ci in range(len(row) - 1, -1, -1):
+            if row[ci] is not None:
+                max_col = max(max_col, ci + 1)
+                break
 
-    share_data = []
-    for r in range(26, 35):  # rows 27-35
-        if r >= len(g) or not g[r][5]:
-            continue
-        airline = str(g[r][5])
-        if airline == 'TTL':
-            airline = 'TOTAL'
-
-        entry = {'airline': airline}
-
-        # Monthly shares (cols 6-11)
-        for mi, m in enumerate(months_share):
-            val = g[r][6 + mi]
-            entry[f'share_{m}'] = float(val) if val is not None else 0
-
-        # Total share (col 12)
-        entry['share_TTL'] = float(g[r][12]) if g[r][12] is not None else 0
-
-        # Current week absolute (cols 14-19)
-        for mi, m in enumerate(months_current):
-            val = g[r][14 + mi]
-            entry[f'curr_{m}'] = int(val) if val is not None and isinstance(val, (int, float)) else 0
-
-        # Current total (col 20)
-        entry['curr_TTL'] = int(g[r][20]) if g[r][20] is not None else 0
-
-        # Previous total (col 29)
-        prev_ttl = g[r][29] if len(g[r]) > 29 else None
-        entry['prev_TTL'] = int(prev_ttl) if prev_ttl is not None else 0
-
-        # WoW change (col 22)
-        wow = g[r][22]
-        entry['wow_pct'] = float(wow) if wow is not None and wow != '#DIV/0!' else 0
-
-        # Previous week absolute (cols 23-28)
-        for mi, m in enumerate(months_current):
-            val = g[r][23 + mi] if len(g[r]) > 23 + mi else None
-            entry[f'prev_{m}'] = int(val) if val is not None and isinstance(val, (int, float)) else 0
-
-        # Monthly WoW changes (cols 30-35)
-        for mi, m in enumerate(months_current):
-            val = g[r][30 + mi] if len(g[r]) > 30 + mi else None
-            if val is not None and val != '#DIV/0!':
-                entry[f'wow_{m}'] = float(val)
+    lines = []
+    rows_to_show = grid[:max_rows] if max_rows else grid
+    for ri, row in enumerate(rows_to_show):
+        cells = []
+        for ci in range(max_col):
+            val = row[ci] if ci < len(row) else None
+            if val is None:
+                cells.append('')
+            elif isinstance(val, float):
+                # Keep precision for percentages, round for large numbers
+                if abs(val) < 1:
+                    cells.append(f'{val:.6f}')
+                elif abs(val) < 100:
+                    cells.append(f'{val:.4f}')
+                else:
+                    cells.append(f'{val:.2f}')
             else:
-                entry[f'wow_{m}'] = None
+                cells.append(str(val))
+        lines.append(f'R{ri}:\t' + '\t'.join(cells))
 
-        # Previous share (col 37)
-        prev_share = g[r][37] if len(g[r]) > 37 else None
-        entry['prev_share'] = float(prev_share) if prev_share is not None else 0
+    return '\n'.join(lines)
 
-        share_data.append(entry)
 
-    data['share'] = share_data
+def _serialize_cell(v):
+    """Convert a cell value to something JSON-safe."""
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return v
+    return str(v)
 
-    # Table 3: Bottom tables (rows 62-71, 0-indexed: 61-70)
-    # Three sub-tables side by side:
-    # Cols F-I (5-8): absolute D+I, I+I, P2P, TTL
-    # Cols K-N (10-13): share within market (% of total per trip type)
-    # Cols P-S (15-18): share within airline
-    bottom_data = []
-    for r in range(62, 71):
-        if r >= len(g) or not g[r][5]:
-            continue
-        airline = str(g[r][5])
-        if airline == 'Grand Total':
-            airline = 'TOTAL'
 
-        entry = {'airline': airline}
+# ─── AI Schema Prompts ───
 
-        # Absolute
-        entry['abs_DI'] = int(g[r][6] or 0)
-        entry['abs_II'] = int(g[r][7] or 0)
-        entry['abs_P2P'] = int(g[r][8] or 0)
-        entry['abs_TTL'] = int(g[r][9] or 0)
+SHEET_PROMPTS = {}
 
-        # Share in market (% of column total)
-        entry['mkt_DI'] = float(g[r][11]) if g[r][11] is not None else 0
-        entry['mkt_II'] = float(g[r][12]) if g[r][12] is not None else 0
-        entry['mkt_P2P'] = float(g[r][13]) if g[r][13] is not None else 0
-        entry['mkt_TTL'] = float(g[r][14]) if g[r][14] is not None else 0
+SHEET_PROMPTS['month_share'] = """You are parsing an airline market share Excel sheet called "Month share - Pax".
+This sheet contains UK-China airline route data viewed from Air China (CA) perspective.
 
-        # Share within airline (% of row total)
-        entry['own_DI'] = float(g[r][16]) if g[r][16] is not None else 0
-        entry['own_II'] = float(g[r][17]) if g[r][17] is not None else 0
-        entry['own_P2P'] = float(g[r][18]) if g[r][18] is not None else 0
+The sheet has multiple tables/sections. Extract ALL of them:
 
-        bottom_data.append(entry)
+## Table 1: triptype (Airlines × Trip Types)
+A table with airline codes (CA, MU, CZ, HU, BA, etc.) as rows, and trip type columns: D+I, I+I, P2P (or 点点), Grand Total.
+- Extract each airline row and the Grand Total row separately.
 
-    data['triptype_detail'] = bottom_data
+## Table 2: share (Market Share + Weekly Comparison)
+A larger table with airlines as rows. It contains multiple column groups:
+- **Share columns**: Monthly market share percentages (values 0-1 representing %, e.g. 0.35 = 35%). Column headers are month names.
+- **Current week columns**: Absolute passenger numbers for the current week, by month. Headers are month names.
+- **Current week total**: TTL column for current week.
+- **WoW % change**: A single column showing week-over-week total change (value like 0.05 = 5%).
+- **Previous week columns**: Absolute passenger numbers for the previous week, by month.
+- **Previous week total**: TTL column for previous week.
+- **WoW change by month**: Week-over-week change for each month (can be negative).
+- **Previous share**: Previous period's total share percentage.
+
+The last row might be "TTL" or "TOTAL" — rename to "TOTAL".
+
+## Table 3: triptype_detail (Bottom Detail)
+Usually at the bottom of the sheet. Three sub-tables side by side, all sharing the same airline rows:
+- **Absolute**: D+I, I+I, P2P, TTL passenger counts
+- **Market share %**: Each airline's % of total market for each trip type (0-1 values)
+- **Airline share %**: Each trip type's % within the airline (0-1 values)
+
+Return JSON with this EXACT structure:
+{
+  "triptype": [{"airline": "CA", "D+I": 1234, "I+I": 567, "P2P": 89, "total": 1890}, ...],
+  "triptype_total": {"D+I": 10000, "I+I": 5000, "P2P": 1000, "total": 16000},
+  "share": [
+    {
+      "airline": "CA",
+      "share_<MONTH1>": 0.35, "share_<MONTH2>": 0.33, "share_TTL": 0.34,
+      "curr_<MONTH1>": 1234, "curr_<MONTH2>": 2345, "curr_TTL": 5678,
+      "wow_pct": 0.05,
+      "prev_<MONTH1>": 1200, "prev_<MONTH2>": 2300, "prev_TTL": 5400,
+      "wow_<MONTH1>": 0.03, "wow_<MONTH2>": -0.01,
+      "prev_share": 0.33
+    }, ...
+  ],
+  "triptype_detail": [
+    {
+      "airline": "CA",
+      "abs_DI": 1234, "abs_II": 567, "abs_P2P": 89, "abs_TTL": 1890,
+      "mkt_DI": 0.35, "mkt_II": 0.25, "mkt_P2P": 0.15, "mkt_TTL": 0.30,
+      "own_DI": 0.65, "own_II": 0.30, "own_P2P": 0.05
+    }, ...
+  ]
+}
+
+CRITICAL RULES:
+- Use the ACTUAL month names from the headers (e.g. share_MAY, curr_JUNE, etc.) — they vary by data period.
+- Copy ALL numbers EXACTLY as they appear. Do NOT calculate or round.
+- Share/percentage values stay as decimals (0.35 not 35).
+- Integer passenger counts stay as integers.
+- If a cell is empty or contains an error like #DIV/0!, use 0 for integers and 0 for floats, null for wow_<MONTH> fields.
+- Rename "TTL"/"Grand Total" airline to "TOTAL".
+"""
+
+SHEET_PROMPTS['all_agents'] = """You are parsing an airline booking agent Excel sheet called "ALL AGTS".
+
+This is a simple matrix: booking agents (rows) × airlines (columns), showing passenger counts.
+
+Structure:
+- Header row contains: "Row Labels", then airline codes (CA, CZ, MU, HU, etc.), then "Grand Total"
+- Data rows: agent name, then passenger count per airline, then total
+- Last row is "Grand Total"
+
+Return JSON:
+{
+  "airlines": ["CA", "CZ", "MU", ...],
+  "agents": [
+    {"agent": "AGENT NAME", "CA": 100, "CZ": 50, ..., "total": 250},
+    ...
+  ]
+}
+
+RULES:
+- Copy ALL numbers exactly. Do NOT calculate.
+- Do NOT include the "Grand Total" row in agents array.
+- List airlines in the same order as the header.
+"""
+
+SHEET_PROMPTS['top30_od'] = """You are parsing an airline OD (origin-destination) pair Excel sheet called "TOP 30 OD - ALL".
+
+This sheet has TWO side-by-side tables:
+
+## Left table: CA Top ODs
+- Two columns: OD pair code (e.g. "LHRPEK") and passenger count
+- Only shows Air China (CA) data
+
+## Right table: All Airlines OD Comparison
+- Header row with "Row Labels", then airline codes (CA, MU, CZ, etc.), then "Grand Total"
+- Data rows: OD pair code, passenger count per airline, total
+
+Return JSON:
+{
+  "ca_ods": [{"od": "LHRPEK", "pax": 1234}, ...],
+  "all_airlines": ["CA", "MU", "CZ", ...],
+  "all_ods": [
+    {"od": "LHRPEK", "CA": 500, "MU": 300, ..., "total": 1200},
+    ...
+  ]
+}
+
+RULES:
+- Copy ALL numbers exactly.
+- Do NOT include "Grand Total" rows.
+- OD codes are 6 characters (3-letter airport codes concatenated, e.g. LHRPEK = London Heathrow to Beijing).
+- List airlines in the same order as the header.
+"""
+
+SHEET_PROMPTS['channel'] = """You are parsing an airline sales channel Excel sheet (CONSOL, OTA, or TMC).
+
+These sheets show how different booking channels/agents perform across airlines.
+The sheet contains multiple SECTIONS laid out horizontally or vertically. Each section has:
+- A title/header like "Present Week", "Weekly Comparison", "Weekly Share", etc.
+- An "Agents" (or TMC company name) header row with airline codes
+- Data rows with agent/company names and values
+
+## Sections to extract:
+
+### share (Market Share %)
+Values are decimals 0-1 representing percentages. Multiply by 100 for the output.
+Each row: agent name + share value per airline.
+
+### present (Present Week Absolute)
+Integer passenger counts for the current week.
+Each row: agent name + pax count per airline + total.
+
+### weekly_comparison (Weekly Comparison)
+Two sets of airline columns side by side: current week and last week.
+Each row: agent name + current week values per airline + total + last week values per airline.
+
+### airline_summary (only for CONSOL sheet)
+A small table showing airline × trip type breakdown (D+I, I+I, P2P, total).
+
+For TMC sheets, the key name is "tmc" instead of "agent".
+
+Return JSON based on sheet type:
+
+For CONSOL:
+{
+  "share": [{"agent": "NAME", "CA": 35.0, "MU": 20.0, ...}, ...],
+  "present": [{"agent": "NAME", "CA": 100, "MU": 50, ..., "total": 200}, ...],
+  "weekly_comparison": [{"agent": "NAME", "CA_curr": 100, "MU_curr": 50, ..., "total_curr": 200, "CA_last": 90, "MU_last": 45, ...}, ...],
+  "airline_summary": [{"airline": "CA", "D+I": 100, "I+I": 50, "P2P": 10, "total": 160}, ...]
+}
+
+For OTA:
+{
+  "airlines": ["CA", "MU", ...],
+  "share": [{"agent": "NAME", "CA": 35.0, ...}, ...],
+  "present": [{"agent": "NAME", "CA": 100, ..., "total": 200}, ...],
+  "weekly_comparison": [{"agent": "NAME", "CA_curr": 100, ..., "total_curr": 200, "CA_last": 90, ...}, ...],
+  "weekly_share": [{"agent": "NAME", "CA": 35.0, ...}, ...]
+}
+
+For TMC:
+{
+  "airlines": ["CA", "BA", "MU", ...],
+  "present": [{"tmc": "NAME", "CA": 100, ..., "total": 200}, ...],
+  "share": [{"tmc": "NAME", "CA": 35.0, ...}, ...],
+  "weekly_comparison": [{"tmc": "NAME", "CA": 100, ..., "total": 200}, ...]
+}
+
+CRITICAL RULES:
+- Share values: multiply the raw decimal by 100 (e.g. 0.35 in cell → 35.0 in JSON).
+- Passenger counts: copy as integers exactly.
+- Rename "Total"/"Grand Total" agent to "TOTAL".
+- Skip rows that are section headers/labels (like "Weekly Share", "Current Week Share", "Present Week", etc.)
+- Stop reading data rows when you hit "Total" or "Grand Total" row.
+- If a section is not found, use empty array [].
+"""
+
+SHEET_PROMPTS['trip_com'] = """You are parsing a Trip.com airline booking Excel sheet.
+
+This shows passenger counts by POO (Point of Origin) country × airline.
+
+Structure:
+- Header row: "Row Labels", then airline codes (CA, MU, CZ, etc.), then "Grand Total"
+- Data rows: country name, passenger count per airline, total
+- Last data row is "Grand Total"
+
+Return JSON:
+{
+  "airlines": ["CA", "MU", "CZ", ...],
+  "countries": [
+    {"country": "United Kingdom", "CA": 100, "MU": 50, ..., "total": 200},
+    ...
+  ]
+}
+
+RULES:
+- Copy ALL numbers exactly.
+- Rename "Grand Total" country row to "TOTAL" and include it.
+- List airlines in the same order as the header.
+"""
+
+
+def ai_parse_sheet(grid, sheet_type, api_key, channel_name=None):
+    """Use Gemini to parse a sheet grid into structured JSON."""
+    grid_text = grid_to_text(grid)
+
+    if sheet_type == 'channel':
+        prompt = SHEET_PROMPTS['channel']
+        prompt = f"Sheet name: {channel_name}\n\n{prompt}"
+    else:
+        prompt = SHEET_PROMPTS[sheet_type]
+
+    full_prompt = f"""{prompt}
+
+Here is the raw sheet data (tab-separated, R0 = first row):
+
+{grid_text}
+
+Return ONLY valid JSON matching the schema above. No explanation."""
+
+    print(f"      Calling Gemini ({len(grid_text)} chars)...", flush=True)
+    t0 = time.time()
+    response_text = call_gemini(full_prompt, api_key)
+    print(f"      Gemini responded in {time.time()-t0:.1f}s", flush=True)
+
+    try:
+        data = json.loads(response_text)
+    except json.JSONDecodeError as e:
+        # Try to extract JSON from markdown code block
+        m = re.search(r'```(?:json)?\s*([\s\S]*?)```', response_text)
+        if m:
+            data = json.loads(m.group(1))
+        else:
+            raise ValueError(f"Failed to parse Gemini response as JSON: {e}\nResponse: {response_text[:500]}")
 
     return data
 
 
-# ─── Sheet 2: ALL AGTS ───
+# ─── City/Country Aggregation (deterministic, not AI) ───
 
-def parse_sheet2(wb):
-    """Parse ALL AGTS sheet - agent × airline matrix."""
-    ws = wb['ALL AGTS']
-    g = read_sheet_as_grid(ws, max_row=200)
+AIRPORT_TO_CITY = {
+    'LHR': 'London', 'LGW': 'London', 'STN': 'London', 'LTN': 'London',
+    'MAN': 'Manchester', 'EDI': 'Edinburgh',
+    'PEK': 'Beijing', 'PKX': 'Beijing',
+    'PVG': 'Shanghai', 'SHA': 'Shanghai',
+    'CAN': 'Guangzhou', 'SZX': 'Shenzhen',
+    'CTU': 'Chengdu', 'TFU': 'Chengdu',
+    'HGH': 'Hangzhou', 'NKG': 'Nanjing',
+    'XIY': "Xi'an", 'WUH': 'Wuhan',
+    'CGO': 'Zhengzhou', 'CSX': 'Changsha',
+    'TAO': 'Qingdao', 'FOC': 'Fuzhou',
+    'SHE': 'Shenyang', 'KMG': 'Kunming',
+    'CKG': 'Chongqing',
+    'HKG': 'Hong Kong', 'NRT': 'Tokyo', 'HND': 'Tokyo',
+    'KIX': 'Osaka', 'ICN': 'Seoul',
+    'BKK': 'Bangkok', 'MNL': 'Manila',
+    'SIN': 'Singapore', 'KUL': 'Kuala Lumpur',
+    'SYD': 'Sydney', 'MEL': 'Melbourne', 'AKL': 'Auckland',
+    'TPE': 'Taipei', 'SGN': 'Ho Chi Minh',
+    'CNX': 'Chiang Mai', 'UBN': 'Ulaanbaatar',
+}
 
-    # Row 8 (idx 8): headers [Row Labels, CA, CZ, MU, HU, HO, BA, ZH, JD, GS, NZ, Grand Total]
-    # Find header row
-    header_row = None
-    for i, row in enumerate(g):
-        if row and row[0] == 'Row Labels':
-            header_row = i
-            break
-
-    if header_row is None:
-        return []
-
-    airlines = []
-    for j in range(1, min(12, len(g[header_row]))):
-        val = g[header_row][j]
-        if val and val != 'Grand Total':
-            airlines.append(str(val))
-
-    agents = []
-    for r in range(header_row + 1, len(g)):
-        if not g[r] or not g[r][0]:
-            continue
-        name = str(g[r][0])
-        if name == 'Grand Total':
-            break
-
-        entry = {'agent': name}
-        total = 0
-        for j, al in enumerate(airlines):
-            val = g[r][1 + j]
-            pax = int(val) if val is not None and isinstance(val, (int, float)) else 0
-            entry[al] = pax
-            total += pax
-
-        gt = g[r][len(airlines) + 1]
-        entry['total'] = int(gt) if gt is not None else total
-        agents.append(entry)
-
-    return {'airlines': airlines, 'agents': agents}
+CITY_TO_COUNTRY = {
+    'London': 'UK', 'Manchester': 'UK', 'Edinburgh': 'UK',
+    'Beijing': 'China', 'Shanghai': 'China', 'Guangzhou': 'China',
+    'Shenzhen': 'China', 'Chengdu': 'China', 'Hangzhou': 'China',
+    'Nanjing': 'China', "Xi'an": 'China', 'Wuhan': 'China',
+    'Zhengzhou': 'China', 'Changsha': 'China', 'Qingdao': 'China',
+    'Fuzhou': 'China', 'Shenyang': 'China', 'Kunming': 'China',
+    'Chongqing': 'China',
+    'Hong Kong': 'HK/Other', 'Tokyo': 'Japan', 'Osaka': 'Japan',
+    'Seoul': 'Korea', 'Bangkok': 'Thailand', 'Manila': 'Philippines',
+    'Singapore': 'Singapore', 'Kuala Lumpur': 'Malaysia',
+    'Sydney': 'Australia', 'Melbourne': 'Australia', 'Auckland': 'New Zealand',
+    'Taipei': 'Taiwan', 'Ho Chi Minh': 'Vietnam',
+    'Chiang Mai': 'Thailand', 'Ulaanbaatar': 'Mongolia',
+}
 
 
-# ─── Sheet 3: TOP 30 OD - ALL ───
-
-def parse_sheet3(wb):
-    """Parse TOP 30 OD - ALL: CA top ODs + all airlines comparison."""
-    ws = wb['TOP 30 OD - ALL']
-    g = read_sheet_as_grid(ws, max_row=45)
-
-    # Left table: CA top ODs (cols A-B, rows 9-38)
-    ca_ods = []
-    for r in range(8, 40):
-        if r >= len(g) or not g[r][0] or g[r][0] == 'Grand Total':
-            break
-        ca_ods.append({'od': str(g[r][0]), 'pax': int(g[r][1] or 0)})
-
-    # Right table: All airlines (cols E-P, rows 9-38)
-    # Row 7 (idx 7): headers
-    all_airlines = []
-    if len(g) > 7:
-        for j in range(5, 16):
-            if j < len(g[7]) and g[7][j] and g[7][j] not in ('Row Labels', 'Grand Total'):
-                all_airlines.append(str(g[7][j]))
-
-    all_ods = []
-    for r in range(8, 40):
-        if r >= len(g) or not g[r][4] or g[r][4] == 'Grand Total':
-            break
-        entry = {'od': str(g[r][4])}
-        for j, al in enumerate(all_airlines):
-            val = g[r][5 + j]
-            entry[al] = int(val) if val is not None and isinstance(val, (int, float)) else 0
-        gt = g[r][5 + len(all_airlines)]
-        entry['total'] = int(gt) if gt is not None else 0
-        all_ods.append(entry)
-
-    # ─── Aggregate to city pairs and country pairs ───
-    AIRPORT_TO_CITY = {
-        'LHR': 'London', 'LGW': 'London', 'STN': 'London', 'LTN': 'London',
-        'MAN': 'Manchester', 'EDI': 'Edinburgh',
-        'PEK': 'Beijing', 'PKX': 'Beijing',
-        'PVG': 'Shanghai', 'SHA': 'Shanghai',
-        'CAN': 'Guangzhou', 'SZX': 'Shenzhen',
-        'CTU': 'Chengdu', 'TFU': 'Chengdu',
-        'HGH': 'Hangzhou', 'NKG': 'Nanjing',
-        'XIY': "Xi'an", 'WUH': 'Wuhan',
-        'CGO': 'Zhengzhou', 'CSX': 'Changsha',
-        'TAO': 'Qingdao', 'FOC': 'Fuzhou',
-        'SHE': 'Shenyang', 'KMG': 'Kunming',
-        'CKG': 'Chongqing',
-        'HKG': 'Hong Kong', 'NRT': 'Tokyo', 'HND': 'Tokyo',
-        'KIX': 'Osaka', 'ICN': 'Seoul',
-        'BKK': 'Bangkok', 'MNL': 'Manila',
-        'SIN': 'Singapore', 'KUL': 'Kuala Lumpur',
-        'SYD': 'Sydney', 'MEL': 'Melbourne', 'AKL': 'Auckland',
-        'TPE': 'Taipei', 'SGN': 'Ho Chi Minh',
-        'CNX': 'Chiang Mai', 'UBN': 'Ulaanbaatar',
-    }
-
-    CITY_TO_COUNTRY = {
-        'London': 'UK', 'Manchester': 'UK', 'Edinburgh': 'UK',
-        'Beijing': 'China', 'Shanghai': 'China', 'Guangzhou': 'China',
-        'Shenzhen': 'China', 'Chengdu': 'China', 'Hangzhou': 'China',
-        'Nanjing': 'China', "Xi'an": 'China', 'Wuhan': 'China',
-        'Zhengzhou': 'China', 'Changsha': 'China', 'Qingdao': 'China',
-        'Fuzhou': 'China', 'Shenyang': 'China', 'Kunming': 'China',
-        'Chongqing': 'China',
-        'Hong Kong': 'HK/Other', 'Tokyo': 'Japan', 'Osaka': 'Japan',
-        'Seoul': 'Korea', 'Bangkok': 'Thailand', 'Manila': 'Philippines',
-        'Singapore': 'Singapore', 'Kuala Lumpur': 'Malaysia',
-        'Sydney': 'Australia', 'Melbourne': 'Australia', 'Auckland': 'New Zealand',
-        'Taipei': 'Taiwan', 'Ho Chi Minh': 'Vietnam',
-        'Chiang Mai': 'Thailand', 'Ulaanbaatar': 'Mongolia',
-    }
-
+def aggregate_od_pairs(all_ods, all_airlines):
+    """Aggregate airport OD pairs into city pairs and country pairs."""
     def get_city(apt):
         return AIRPORT_TO_CITY.get(apt, apt)
-
-    def make_pair_key(orig, dest):
-        """UK is always origin in this sheet, so keep direction."""
-        return f'{orig} → {dest}'
 
     # City pair aggregation
     city_pair_map = {}
     for od in all_ods:
         code = od['od']
+        if len(code) < 6:
+            continue
         orig_apt, dest_apt = code[:3], code[3:]
         orig_city, dest_city = get_city(orig_apt), get_city(dest_apt)
-        cpkey = make_pair_key(orig_city, dest_city)
+        cpkey = f'{orig_city} → {dest_city}'
 
         if cpkey not in city_pair_map:
             city_pair_map[cpkey] = {al: 0 for al in all_airlines}
@@ -340,7 +444,7 @@ def parse_sheet3(wb):
         if len(cities) == 2:
             c1 = CITY_TO_COUNTRY.get(cities[0], 'Other')
             c2 = CITY_TO_COUNTRY.get(cities[1], 'Other')
-            cpkey = make_pair_key(c1, c2)
+            cpkey = f'{c1} → {c2}'
         else:
             cpkey = 'Other'
 
@@ -355,443 +459,50 @@ def parse_sheet3(wb):
 
     country_pairs = sorted(country_pair_map.values(), key=lambda x: x['total'], reverse=True)
 
-    return {
-        'ca_ods': ca_ods,
-        'all_airlines': all_airlines,
-        'all_ods': all_ods,
-        'city_pairs': city_pairs,
-        'country_pairs': country_pairs,
-    }
+    return city_pairs, country_pairs
 
 
-# ─── Sheet 4: CONSOL ───
+# ─── Sanity Check ───
 
-def parse_sheet4(wb):
-    """Parse CONSOL sheet - dynamically find sections."""
-    ws = wb['CONSOL']
-    g = read_sheet_as_grid(ws, max_row=65, max_col=50)
+def validate_parsed_data(sheets):
+    """Run sanity checks on parsed data. Returns list of warnings."""
+    warnings = []
 
-    sections = find_sections(g, marker_col_start=10, marker_col_end=30)
+    # month_share checks
+    ms = sheets.get('month_share', {})
+    if not ms.get('triptype'):
+        warnings.append("⚠️ month_share: no triptype data")
+    if not ms.get('share'):
+        warnings.append("⚠️ month_share: no share data")
+    else:
+        airlines_in_share = [s['airline'] for s in ms['share']]
+        if 'CA' not in airlines_in_share and 'TOTAL' not in airlines_in_share:
+            warnings.append("⚠️ month_share: CA not found in share data")
 
-    share_data = []
-    present_data = []
-    weekly_comparison = []
+    # all_agents checks
+    aa = sheets.get('all_agents', {})
+    if not aa.get('agents'):
+        warnings.append("⚠️ all_agents: no agents found")
+    elif len(aa['agents']) < 10:
+        warnings.append(f"⚠️ all_agents: only {len(aa['agents'])} agents (expected 100+)")
 
-    for sec in sections:
-        if not sec['airlines']:
-            continue
-        if sec['type'] == 'share' or (sec['type'] == 'unknown' and not share_data):
-            share_data = read_section_data(g, sec, is_pct=True)
-        elif sec['type'] in ('present',) and not present_data:
-            present_data = read_section_data(g, sec, is_pct=False)
-        elif sec['type'] == 'weekly' and not weekly_comparison:
-            # Weekly with curr + last side by side
-            r_start = sec['row'] + 1
-            col = sec['col']
-            als = sec['airlines']
-            total_col = col + 1 + len(als)
-            last_start = total_col + 2  # skip Total col + agent name repeat
-            wc = []
-            for r in range(r_start, min(r_start + 20, len(g))):
-                if r >= len(g) or not g[r] or not g[r][col]: continue
-                agent = str(g[r][col])
-                if agent in ('Agents', 'Weekly Comparison'): continue
-                if agent in ('Grand Total', 'Total'): agent = 'TOTAL'
-                nv = g[r][col + 1] if col + 1 < len(g[r] or []) else None
-                if isinstance(nv, str): continue
-                entry = {'agent': agent}
-                for j, al in enumerate(als):
-                    val = g[r][col + 1 + j] if col + 1 + j < len(g[r] or []) else None
-                    entry[f'{al}_curr'] = int(val) if val is not None and isinstance(val, (int, float)) else 0
-                t_val = g[r][total_col] if total_col < len(g[r] or []) else None
-                entry['total_curr'] = int(t_val) if t_val is not None and isinstance(t_val, (int, float)) else 0
-                for j, al in enumerate(als):
-                    val = g[r][last_start + j] if last_start + j < len(g[r] or []) else None
-                    entry[f'{al}_last'] = int(val) if val is not None and isinstance(val, (int, float)) else 0
-                wc.append(entry)
-                if entry.get("agent") == "TOTAL" or entry.get("tmc") == "TOTAL":
-                    break
-            weekly_comparison = wc
+    # top30_od checks
+    od = sheets.get('top30_od', {})
+    if not od.get('all_ods'):
+        warnings.append("⚠️ top30_od: no OD data")
 
-    # Airline summary: search for triptype or YTD table in bottom area
-    airline_summary = []
-    for r in range(35, min(65, len(g))):
-        if r >= len(g) or not g[r]: continue
-        # Search in col 15 area for "Row Labels"
-        for c in range(10, 20):
-            if c < len(g[r]) and g[r][c] == 'Row Labels':
-                next_col = g[r][c + 1] if c + 1 < len(g[r]) else None
-                if next_col in ('D+I', 'I+I'):
-                    for rr in range(r + 1, min(r + 15, len(g))):
-                        if rr >= len(g) or not g[rr][c]: continue
-                        al = str(g[rr][c])
-                        if al in ('TTL', 'Grand Total'): break
-                        entry = {'airline': al}
-                        for j, cn in enumerate(['D+I', 'I+I', 'P2P', 'total']):
-                            val = g[rr][c + 1 + j] if c + 1 + j < len(g[rr]) else None
-                            entry[cn] = int(val) if val is not None and isinstance(val, (int, float)) else 0
-                        airline_summary.append(entry)
-                break
-        if airline_summary:
-            break
+    # Channel checks
+    for ch_name in ('consol', 'ota', 'tmc'):
+        ch = sheets.get(ch_name, {})
+        if not ch.get('present') and not ch.get('share'):
+            warnings.append(f"⚠️ {ch_name}: no present or share data")
 
-    return {
-        'share': share_data,
-        'present': present_data,
-        'weekly_comparison': weekly_comparison,
-        'airline_summary': airline_summary,
-    }
+    # trip_com checks
+    tc = sheets.get('trip_com', {})
+    if not tc.get('countries'):
+        warnings.append("⚠️ trip_com: no country data")
 
-
-# ─── Helper: find table sections by header markers ───
-
-def find_sections(g, marker_col_start=20, marker_col_end=45):
-    """Scan grid for 'Agents' header rows in the right-side area.
-    Returns list of {'type': ..., 'row': header_row, 'col': agent_col, 'airlines': [...]}
-    """
-    sections = []
-    for r in range(len(g)):
-        for c in range(marker_col_start, min(marker_col_end, len(g[r]) if g[r] else 0)):
-            val = g[r][c]
-            if val == 'Agents':
-                # Read airline names from this header row
-                airlines = []
-                for j in range(c + 1, min(c + 15, len(g[r]))):
-                    h = g[r][j]
-                    if h is None or h in ('Grand Total', 'Total'):
-                        break
-                    if isinstance(h, str) and len(h) <= 3 and h.isalpha():
-                        airlines.append(h)
-                # Determine section type from row above
-                section_type = 'unknown'
-                if r > 0:
-                    for cc in range(c, min(c + 5, len(g[r-1]) if g[r-1] else 0)):
-                        prev = g[r-1][cc] if g[r-1] else None
-                        if prev and isinstance(prev, str):
-                            pv = prev.strip().lower()
-                            if 'present week' in pv or 'total' == pv:
-                                section_type = 'present'
-                            elif 'weekly comparison' in pv:
-                                section_type = 'weekly'
-                            elif 'weekly share' in pv:
-                                section_type = 'weekly_share'
-                            elif 'previous' in pv or 'past' in pv:
-                                section_type = 'previous_share'
-                            break
-                # If still unknown, check if values in next row are floats (share) or ints (pax)
-                if section_type == 'unknown' and r + 1 < len(g):
-                    sample = g[r+1][c+1] if c+1 < len(g[r+1] or []) else None
-                    if isinstance(sample, float) and 0 < sample < 1:
-                        section_type = 'share'
-                    elif isinstance(sample, (int, float)) and sample > 1:
-                        section_type = 'present'
-                sections.append({'type': section_type, 'row': r, 'col': c, 'airlines': airlines})
-    return sections
-
-
-def read_section_data(g, section, is_pct=False):
-    """Read rows after a section header until Total/Grand Total row (inclusive)."""
-    data = []
-    r_start = section['row'] + 1
-    col = section['col']
-    airlines = section['airlines']
-    total_col = col + 1 + len(airlines)  # col after last airline
-
-    for r in range(r_start, min(r_start + 25, len(g))):
-        if r >= len(g) or not g[r] or not g[r][col]:
-            continue
-        agent = str(g[r][col])
-        # Skip known section markers
-        if agent in ('Agents', 'Row Labels', 'Weekly Comparison', 'Weekly Share',
-                      'Current Week Share', 'Past Week Share', 'Growth weekly',
-                      'Previous Week Share', 'PRESENT WEEK', 'PREVIOUS'):
-            continue
-        is_total = agent in ('Total', 'Grand Total', 'TOTAL')
-        if is_total:
-            agent = 'TOTAL'
-
-        # Skip if next cell is text (sub-header)
-        next_val = g[r][col + 1] if col + 1 < len(g[r] or []) else None
-        if isinstance(next_val, str) and next_val in airlines:
-            continue
-
-        entry = {'agent': agent}
-        for j, al in enumerate(airlines):
-            val = g[r][col + 1 + j] if col + 1 + j < len(g[r] or []) else None
-            if is_pct:
-                entry[al] = float(val) * 100 if val is not None and isinstance(val, (int, float)) else 0
-            else:
-                entry[al] = int(val) if val is not None and isinstance(val, (int, float)) else 0
-
-        # Total column
-        t_val = g[r][total_col] if total_col < len(g[r] or []) else None
-        if not is_pct:
-            entry['total'] = int(t_val) if t_val is not None and isinstance(t_val, (int, float)) else sum(entry.get(al, 0) for al in airlines)
-
-        data.append(entry)
-        if is_total:
-            break  # Stop after Total row, don't read into next section
-    return data
-
-
-# ─── Sheet 6: OTA ───
-
-def parse_sheet6(wb):
-    """Parse OTA sheet - dynamically find sections by header markers."""
-    ws = wb['OTA']
-    g = read_sheet_as_grid(ws, max_row=85, max_col=55)
-
-    sections = find_sections(g, marker_col_start=20, marker_col_end=45)
-
-    share_data = []
-    present_data = []
-    weekly_comparison = []
-    weekly_share_curr = []
-    ota_airlines = []
-
-    for sec in sections:
-        if not sec['airlines']:
-            continue
-        if not ota_airlines:
-            ota_airlines = sec['airlines']
-
-        if sec['type'] == 'share' or (sec['type'] == 'unknown' and not share_data):
-            share_data = read_section_data(g, sec, is_pct=True)
-        elif sec['type'] == 'present' and not present_data:
-            present_data = read_section_data(g, sec, is_pct=False)
-        elif sec['type'] == 'weekly':
-            # Weekly comparison: two sets of airlines side by side (curr + last)
-            raw = read_section_data(g, sec, is_pct=False)
-            # The section has airlines for current, then after Total col, same airlines for last week
-            # Re-read with extended columns
-            wc = []
-            r_start = sec['row'] + 1
-            col = sec['col']
-            als = sec['airlines']
-            total_col = col + 1 + len(als)
-            last_start = total_col + 2  # skip Total col + agent name repeat  # skip Total, then last week airlines
-
-            for r in range(r_start, min(r_start + 20, len(g))):
-                if r >= len(g) or not g[r] or not g[r][col]:
-                    continue
-                agent = str(g[r][col])
-                if agent in ('Agents', 'Weekly Comparison'):
-                    continue
-                if agent in ('Total', 'Grand Total'):
-                    agent = 'TOTAL'
-                next_val = g[r][col + 1] if col + 1 < len(g[r] or []) else None
-                if isinstance(next_val, str):
-                    continue
-
-                entry = {'agent': agent}
-                for j, al in enumerate(als):
-                    val = g[r][col + 1 + j] if col + 1 + j < len(g[r] or []) else None
-                    entry[f'{al}_curr'] = int(val) if val is not None and isinstance(val, (int, float)) else 0
-                t_val = g[r][total_col] if total_col < len(g[r] or []) else None
-                entry['total_curr'] = int(t_val) if t_val is not None and isinstance(t_val, (int, float)) else 0
-                # Last week values
-                for j, al in enumerate(als):
-                    val = g[r][last_start + j] if last_start + j < len(g[r] or []) else None
-                    entry[f'{al}_last'] = int(val) if val is not None and isinstance(val, (int, float)) else 0
-                wc.append(entry)
-                if entry.get("agent") == "TOTAL" or entry.get("tmc") == "TOTAL":
-                    break
-            weekly_comparison = wc
-        elif sec['type'] == 'weekly_share':
-            weekly_share_curr = read_section_data(g, sec, is_pct=True)
-
-    return {
-        'airlines': ota_airlines[:6] if ota_airlines else ['CA', 'MU', 'CZ', 'HU', 'ZH', 'HO'],
-        'share': share_data,
-        'present': present_data,
-        'weekly_comparison': weekly_comparison,
-        'weekly_share': weekly_share_curr,
-    }
-
-
-# ─── Sheet 7: TMC ───
-
-def parse_sheet7(wb):
-    """Parse TMC sheet - dynamically find sections."""
-    ws = wb['TMC']
-    g = read_sheet_as_grid(ws, max_row=75, max_col=45)
-
-    # TMC uses named TMC companies instead of "Agents" as marker.
-    # Search for rows with TMC name pattern: row has a known TMC name at some col,
-    # and the row above has airline codes (CA, BA, MU...).
-    # Use find_sections but also search for "PRESENT WEEK" / TMC names
-
-    # Strategy: find header rows that contain airline codes like CA, BA, MU
-    def find_tmc_sections():
-        sections = []
-        for r in range(len(g)):
-            for c in range(8, min(30, len(g[r]) if g[r] else 0)):
-                val = g[r][c]
-                # Look for known TMC names or "PRESENT WEEK" marker
-                if val and isinstance(val, str) and val in ('PRESENT WEEK', 'PREVIOUS', 'CURRENT WEEK'):
-                    # Next row should have TMC names and airline values
-                    if r + 1 < len(g) and g[r + 1]:
-                        tmc_name = g[r + 1][c]
-                        if tmc_name and isinstance(tmc_name, str):
-                            # Read airline headers from the row with this TMC
-                            # The airlines are in the header one row before data
-                            airlines = []
-                            # Check if same row has airline names after TMC col
-                            for j in range(c + 1, min(c + 12, len(g[r + 1]) if g[r + 1] else 0)):
-                                h = g[r][j] if g[r] else None  # header row = marker row
-                                # Actually check: the marker row might have "CA", "BA", etc.
-                                pass
-
-                            # Better approach: find a row that starts with TMC names and has numbers
-                            # Look for the Agents-like header
-                            pass
-                    sections.append({'marker': val, 'row': r, 'col': c})
-        return sections
-
-    # Even simpler: use the same find_sections but search wider and for TMC-specific patterns
-    # TMC section headers use TMC company names directly, with airline cols as values
-    # Let me just scan for rows where col has a known TMC name and col+1 has a number
-
-    sections = find_sections(g, marker_col_start=8, marker_col_end=25)
-
-    # Also scan for "PRESENT WEEK" / "PREVIOUS" markers
-    present_markers = []
-    for r in range(len(g)):
-        for c in range(8, min(25, len(g[r]) if g[r] else 0)):
-            val = g[r][c]
-            if val and isinstance(val, str):
-                vl = val.strip()
-                if vl in ('PRESENT WEEK', 'CURRENT WEEK'):
-                    present_markers.append({'type': 'present_header', 'row': r, 'col': c})
-                elif vl == 'PREVIOUS':
-                    present_markers.append({'type': 'previous_header', 'row': r, 'col': c})
-
-    present_data = []
-    share_data = []
-    weekly_comparison = []
-    tmc_airlines = []
-
-    # Use find_sections results if available
-    for sec in sections:
-        if not sec['airlines']:
-            continue
-        if not tmc_airlines:
-            tmc_airlines = sec['airlines']
-
-        # Rename 'agent' key to 'tmc' in results
-        if sec['type'] == 'share' or (sec['type'] == 'unknown' and not share_data):
-            raw = read_section_data(g, sec, is_pct=True)
-            share_data = [{'tmc': d.pop('agent'), **d} for d in raw]
-        elif sec['type'] == 'present' and not present_data:
-            raw = read_section_data(g, sec, is_pct=False)
-            present_data = [{'tmc': d.pop('agent'), **d} for d in raw]
-        elif sec['type'] == 'weekly' and not weekly_comparison:
-            r_start = sec['row'] + 1
-            col = sec['col']
-            als = sec['airlines']
-            total_col = col + 1 + len(als)
-            last_start = total_col + 2  # skip Total col + agent name repeat
-            wc = []
-            for r in range(r_start, min(r_start + 20, len(g))):
-                if r >= len(g) or not g[r] or not g[r][col]: continue
-                tmc = str(g[r][col])
-                if tmc in ('Agents', 'Weekly Comparison', 'PRESENT WEEK', 'PREVIOUS'): continue
-                if tmc in ('Grand Total', 'Total'): tmc = 'TOTAL'
-                nv = g[r][col + 1] if col + 1 < len(g[r] or []) else None
-                if isinstance(nv, str): continue
-                entry = {'tmc': tmc}
-                for j, al in enumerate(als):
-                    val = g[r][col + 1 + j] if col + 1 + j < len(g[r] or []) else None
-                    entry[al] = int(val) if val is not None and isinstance(val, (int, float)) else 0
-                t_val = g[r][total_col] if total_col < len(g[r] or []) else None
-                entry['total'] = int(t_val) if t_val is not None and isinstance(t_val, (int, float)) else 0
-                wc.append(entry)
-                if entry.get("agent") == "TOTAL" or entry.get("tmc") == "TOTAL":
-                    break
-            weekly_comparison = wc
-
-    # If find_sections didn't find TMC data (different structure),
-    # try present_markers approach
-    if not present_data and present_markers:
-        for pm in present_markers:
-            if pm['type'] == 'present_header':
-                r = pm['row']
-                c = pm['col']
-                # The TMC names are at col c, airlines at col c+1 onwards
-                # Read row r to find TMC name and next row for data
-                # Actually: marker row has TMC names listed vertically below
-                # and airline values horizontally
-                # Read the next rows as TMC data
-                als = []
-                # Find airline header - usually same row as PRESENT WEEK or one below
-                for rr in range(r, min(r + 2, len(g))):
-                    for j in range(c + 1, min(c + 12, len(g[rr]) if g[rr] else 0)):
-                        h = g[rr][j]
-                        if h and isinstance(h, str) and len(h) <= 3 and h.isalpha() and h.isupper():
-                            als.append(h)
-                    if als:
-                        break
-
-                if not als:
-                    continue
-                if not tmc_airlines:
-                    tmc_airlines = als
-
-                # Read TMC rows: col c = TMC name, col c+1..c+n = airline values
-                for rr in range(r + 1, min(r + 25, len(g))):
-                    if rr >= len(g) or not g[rr] or not g[rr][c]: continue
-                    tmc = str(g[rr][c])
-                    if tmc in ('PRESENT WEEK', 'PREVIOUS', 'CURRENT WEEK'): continue
-                    if tmc == 'Grand Total':
-                        tmc = 'TOTAL'
-                    nv = g[rr][c + 1] if c + 1 < len(g[rr] or []) else None
-                    if isinstance(nv, str) and nv in als:
-                        continue  # another header row
-                    entry = {'tmc': tmc}
-                    for j, al in enumerate(als):
-                        val = g[rr][c + 1 + j] if c + 1 + j < len(g[rr] or []) else None
-                        entry[al] = int(val) if val is not None and isinstance(val, (int, float)) else 0
-                    # Total
-                    tc = c + 1 + len(als)
-                    t_val = g[rr][tc] if tc < len(g[rr] or []) else None
-                    entry['total'] = int(t_val) if t_val is not None and isinstance(t_val, (int, float)) else sum(entry.get(al, 0) for al in als)
-                    present_data.append(entry)
-                break
-
-    return {
-        'airlines': tmc_airlines if tmc_airlines else ['CA', 'BA', 'MU', 'CZ', 'HU', 'ZH', 'HO', 'GS'],
-        'present': present_data,
-        'share': share_data,
-        'weekly_comparison': weekly_comparison,
-    }
-
-
-# ─── Sheet 8: Trip.com ───
-
-def parse_sheet8(wb):
-    """Parse Trip.com sheet - by POO country."""
-    ws = wb['Trip.com']
-    g = read_sheet_as_grid(ws, max_row=40)
-
-    # Row 5 (idx 5): headers [Row Labels, CA, MU, CZ, HU, HO, ZH, GS, JD, BA, Grand Total]
-    trip_airlines = ['CA', 'MU', 'CZ', 'HU', 'HO', 'ZH', 'GS', 'JD', 'BA']
-
-    countries = []
-    for r in range(6, 35):
-        if r >= len(g) or not g[r][0]:
-            continue
-        country = str(g[r][0])
-        if country == 'Grand Total':
-            country = 'TOTAL'
-        entry = {'country': country}
-        for j, al in enumerate(trip_airlines):
-            val = g[r][1 + j]
-            entry[al] = int(val) if val is not None and isinstance(val, (int, float)) else 0
-        gt = g[r][10] if len(g[r]) > 10 else None
-        entry['total'] = int(gt) if gt is not None else 0
-        countries.append(entry)
-
-    return {'airlines': trip_airlines, 'countries': countries}
+    return warnings
 
 
 # ─── Raw grid export ───
@@ -807,20 +518,20 @@ RAW_SHEET_MAP = {
     'Trip.com':          'raw_trip_com',
 }
 
-
-def _serialize_cell(v):
-    """Convert a cell value to something JSON-safe."""
-    if v is None:
-        return None
-    if isinstance(v, (int, float)):
-        return v
-    return str(v)
+# Sheet name → (parser_sheet_key, ai_type, channel_name_for_channel_type)
+SHEET_PARSE_MAP = {
+    'Month share - Pax': ('month_share', 'month_share', None),
+    'ALL AGTS':          ('all_agents', 'all_agents', None),
+    'TOP 30 OD - ALL':   ('top30_od', 'top30_od', None),
+    'CONSOL':            ('consol', 'channel', 'CONSOL'),
+    'OTA':               ('ota', 'channel', 'OTA'),
+    'TMC':               ('tmc', 'channel', 'TMC'),
+    'Trip.com':          ('trip_com', 'trip_com', None),
+}
 
 
 def parse_raw_grids(wb):
-    """Read each Excel sheet into a raw 2D array (up to 200 rows x 50 cols).
-    Returns dict mapping safe_name -> grid (list of lists).
-    """
+    """Read each Excel sheet into a raw 2D array (up to 200 rows x 50 cols)."""
     result = {}
     for sheet_name, safe_name in RAW_SHEET_MAP.items():
         if sheet_name not in wb.sheetnames:
@@ -828,14 +539,11 @@ def parse_raw_grids(wb):
             continue
         ws = wb[sheet_name]
         grid = read_sheet_as_grid(ws, max_row=200, max_col=50)
-        # Convert all cells to JSON-safe values
         grid = [[_serialize_cell(c) for c in row] for row in grid]
-        # Trim trailing all-None rows
         while grid and all(c is None for c in grid[-1]):
             grid.pop()
-        # Trim trailing None cols from each row
+        max_used_col = 0
         if grid:
-            max_used_col = 0
             for row in grid:
                 for ci in range(len(row) - 1, -1, -1):
                     if row[ci] is not None:
@@ -843,42 +551,112 @@ def parse_raw_grids(wb):
                         break
             grid = [row[:max_used_col] for row in grid]
         result[safe_name] = grid
-        print(f"   [raw] {safe_name}: {len(grid)} rows x {max_used_col if grid else 0} cols", flush=True)
+        print(f"   [raw] {safe_name}: {len(grid)} rows x {max_used_col} cols", flush=True)
     return result
 
 
 # ─── Main ───
 
-def parse_sheets(filepath, db_path=None):
+def parse_sheets(filepath, db_path=None, api_key=None):
     if db_path is None:
         db_path = DB_PATH
+    if api_key is None:
+        api_key = os.environ.get('GEMINI_API_KEY', '')
+
+    if not api_key:
+        print("ERROR: No Gemini API key provided.", flush=True)
+        print("   Set GEMINI_API_KEY env var or pass --gemini-key <key>", flush=True)
+        sys.exit(1)
 
     filepath = os.path.expanduser(filepath)
     snapshot = extract_snapshot_date(filepath)
 
-    print(f"[1/3] Opening workbook (data_only)...", flush=True)
+    print(f"[1/4] Opening workbook (data_only)...", flush=True)
     t0 = time.time()
     wb = openpyxl.load_workbook(filepath, read_only=True, data_only=True)
     print(f"   Opened in {time.time()-t0:.1f}s", flush=True)
 
-    print(f"[2/3] Parsing sheets...", flush=True)
+    # Read all sheet grids
+    print(f"[2/4] Reading sheet grids...", flush=True)
+    sheet_grids = {}
+    for sheet_name in SHEET_PARSE_MAP:
+        if sheet_name not in wb.sheetnames:
+            print(f"   Sheet '{sheet_name}' not found, skipping", flush=True)
+            continue
+        ws = wb[sheet_name]
+        max_row = 200 if sheet_name == 'ALL AGTS' else 120
+        max_col = 55 if sheet_name in ('OTA', 'CONSOL') else 80
+        grid = read_sheet_as_grid(ws, max_row=max_row, max_col=max_col)
+        # Serialize for AI consumption
+        grid = [[_serialize_cell(c) for c in row] for row in grid]
+        # Trim
+        while grid and all(c is None for c in grid[-1]):
+            grid.pop()
+        if grid:
+            max_used = 0
+            for row in grid:
+                for ci in range(len(row) - 1, -1, -1):
+                    if row[ci] is not None:
+                        max_used = max(max_used, ci + 1)
+                        break
+            grid = [row[:max_used] for row in grid]
+        sheet_grids[sheet_name] = grid
+        print(f"   {sheet_name}: {len(grid)} rows x {max_used if grid else 0} cols", flush=True)
 
-    sheet1 = parse_sheet1(wb)
-    sheet2 = parse_sheet2(wb)
-    sheet3 = parse_sheet3(wb)
-    sheet4 = parse_sheet4(wb)
-    sheet6 = parse_sheet6(wb)
-    sheet7 = parse_sheet7(wb)
-    sheet8 = parse_sheet8(wb)
-
+    # Parse raw grids for raw data tab
     print(f"   Parsing raw grids...", flush=True)
     raw_grids = parse_raw_grids(wb)
-
     wb.close()
-    print(f"   All sheets parsed in {time.time()-t0:.1f}s", flush=True)
+    print(f"   All grids read in {time.time()-t0:.1f}s", flush=True)
 
-    # Store as JSON in SQLite
-    print(f"[3/3] Storing in SQLite...", flush=True)
+    # AI parse each sheet (parallel)
+    print(f"[3/4] AI parsing sheets via Gemini (parallel)...", flush=True)
+    sheets = {}
+
+    def _parse_one(sheet_name, key, ai_type, channel_name):
+        print(f"   Parsing {sheet_name}...", flush=True)
+        data = ai_parse_sheet(sheet_grids[sheet_name], ai_type, api_key, channel_name)
+        print(f"   ✓ {sheet_name} parsed successfully", flush=True)
+        return key, data
+
+    tasks = {}
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        for sheet_name, (key, ai_type, channel_name) in SHEET_PARSE_MAP.items():
+            if sheet_name not in sheet_grids:
+                sheets[key] = {}
+                continue
+            future = executor.submit(_parse_one, sheet_name, key, ai_type, channel_name)
+            tasks[future] = (sheet_name, key)
+
+        for future in as_completed(tasks):
+            sheet_name, key = tasks[future]
+            try:
+                k, data = future.result()
+                sheets[k] = data
+            except Exception as e:
+                print(f"   ✗ {sheet_name} failed: {e}", flush=True)
+                sheets[key] = {}
+
+    # Post-process: add city/country aggregation to top30_od
+    if sheets.get('top30_od', {}).get('all_ods'):
+        all_airlines = sheets['top30_od'].get('all_airlines', [])
+        all_ods = sheets['top30_od']['all_ods']
+        city_pairs, country_pairs = aggregate_od_pairs(all_ods, all_airlines)
+        sheets['top30_od']['city_pairs'] = city_pairs
+        sheets['top30_od']['country_pairs'] = country_pairs
+        print(f"   ✓ OD aggregation: {len(city_pairs)} city pairs, {len(country_pairs)} country pairs", flush=True)
+
+    # Validate
+    warnings = validate_parsed_data(sheets)
+    if warnings:
+        print(f"\n   ⚠️ Validation warnings:", flush=True)
+        for w in warnings:
+            print(f"   {w}", flush=True)
+    else:
+        print(f"   ✓ All validation checks passed", flush=True)
+
+    # Store in SQLite
+    print(f"[4/4] Storing in SQLite...", flush=True)
     db_path_abs = os.path.abspath(db_path)
     os.makedirs(os.path.dirname(db_path_abs), exist_ok=True)
     conn = sqlite3.connect(db_path_abs)
@@ -891,21 +669,10 @@ def parse_sheets(filepath, db_path=None):
         PRIMARY KEY (snapshot_date, sheet_name)
     )""")
 
-    sheets = {
-        'month_share': sheet1,
-        'all_agents': sheet2,
-        'top30_od': sheet3,
-        'consol': sheet4,
-        'ota': sheet6,
-        'tmc': sheet7,
-        'trip_com': sheet8,
-    }
-
     for name, data in sheets.items():
         c.execute("""INSERT OR REPLACE INTO sheet_data VALUES (?, ?, ?)""",
                   (snapshot, name, json.dumps(data, ensure_ascii=False)))
 
-    # Store raw grids
     for safe_name, grid in raw_grids.items():
         c.execute("""INSERT OR REPLACE INTO sheet_data VALUES (?, ?, ?)""",
                   (snapshot, safe_name, json.dumps(grid, ensure_ascii=False)))
@@ -913,31 +680,43 @@ def parse_sheets(filepath, db_path=None):
     conn.commit()
     conn.close()
 
-    print(f"   Done! Snapshot: {snapshot}", flush=True)
-    print(f"   Sheets stored: {list(sheets.keys())}", flush=True)
+    print(f"\n   Done! Snapshot: {snapshot}", flush=True)
     print(f"   Total time: {time.time()-t0:.1f}s", flush=True)
 
-    # Print summary
-    print(f"\n   Sheet1 share data: {len(sheet1.get('share', []))} airlines", flush=True)
-    print(f"   Sheet2 agents: {len(sheet2.get('agents', []))}", flush=True)
-    print(f"   Sheet3 ODs: CA={len(sheet3.get('ca_ods', []))}, ALL={len(sheet3.get('all_ods', []))}", flush=True)
-    print(f"   Sheet4 CONSOL: {len(sheet4.get('present', []))} agents", flush=True)
-    print(f"   Sheet6 OTA: {len(sheet6.get('present', []))} agents", flush=True)
-    print(f"   Sheet7 TMC: {len(sheet7.get('present', []))} TMCs", flush=True)
-    print(f"   Sheet8 Trip.com: {len(sheet8.get('countries', []))} countries", flush=True)
+    # Summary
+    ms = sheets.get('month_share', {})
+    print(f"\n   Sheet1 share data: {len(ms.get('share', []))} airlines", flush=True)
+    print(f"   Sheet2 agents: {len(sheets.get('all_agents', {}).get('agents', []))}", flush=True)
+    od = sheets.get('top30_od', {})
+    print(f"   Sheet3 ODs: CA={len(od.get('ca_ods', []))}, ALL={len(od.get('all_ods', []))}", flush=True)
+    print(f"   Sheet4 CONSOL: {len(sheets.get('consol', {}).get('present', []))} agents", flush=True)
+    print(f"   Sheet6 OTA: {len(sheets.get('ota', {}).get('present', []))} agents", flush=True)
+    print(f"   Sheet7 TMC: {len(sheets.get('tmc', {}).get('present', []))} TMCs", flush=True)
+    print(f"   Sheet8 Trip.com: {len(sheets.get('trip_com', {}).get('countries', []))} countries", flush=True)
 
     return snapshot
 
 
 if __name__ == '__main__':
     if len(sys.argv) < 2:
-        print("Usage: python sheet_parser.py <excel_file> [--db DB_PATH]")
+        print("Usage: python sheet_parser.py <excel_file> [--db DB_PATH] [--gemini-key KEY]")
         sys.exit(1)
+
     db_path = None
+    api_key = None
+
     if '--db' in sys.argv:
         idx = sys.argv.index('--db')
         if idx + 1 < len(sys.argv):
             db_path = sys.argv[idx + 1]
+    if '--gemini-key' in sys.argv:
+        idx = sys.argv.index('--gemini-key')
+        if idx + 1 < len(sys.argv):
+            api_key = sys.argv[idx + 1]
+
     if not db_path:
         db_path = os.environ.get('DB_PATH', DB_PATH)
-    parse_sheets(sys.argv[1], db_path=db_path)
+    if not api_key:
+        api_key = os.environ.get('GEMINI_API_KEY', '')
+
+    parse_sheets(sys.argv[1], db_path=db_path, api_key=api_key)

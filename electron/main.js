@@ -144,22 +144,31 @@ function findBinary(name) {
 
 // ─── IPC: Import Excel ───
 
-ipcMain.handle('import:excel', async () => {
-  // Check for compiled binaries first, then fall back to Python
+ipcMain.handle('import:excel', async (event, geminiKey) => {
+  // Check for compiled binaries independently
   const parserBin = findBinary('parser-bin')
   const sheetBin = findBinary('sheet-parser-bin')
-  const hasBinaries = parserBin && sheetBin
 
+  // sheet_parser.py always needs Python (it calls Gemini API, no binary)
+  // parser.py can use binary OR Python
   let pythonCmd = null
-  if (!hasBinaries) {
+  if (!parserBin || !sheetBin) {
     pythonCmd = await findPython()
-    if (!pythonCmd) {
+    if (!pythonCmd && !parserBin) {
       return {
         ok: false,
         error: '未检测到解析器。\n\n' +
-          '方案1: 下载包含内置解析器的完整版安装包\n\n' +
-          '方案2: 安装 Python 3.9+ (https://www.python.org/downloads/)\n' +
-          '然后运行: pip install pandas openpyxl python-calamine',
+          '请安装 Python 3.9+ (https://www.python.org/downloads/)\n' +
+          '然后运行: pip install openpyxl',
+      }
+    }
+    // sheet_parser always needs Python for Gemini API calls
+    if (!pythonCmd) {
+      return {
+        ok: false,
+        error: '需要 Python 环境来运行 AI 解析。\n\n' +
+          '请安装 Python 3.9+ (https://www.python.org/downloads/)\n' +
+          '然后运行: pip install openpyxl',
       }
     }
   }
@@ -176,20 +185,20 @@ ipcMain.handle('import:excel', async () => {
 
   const filePath = result.filePaths[0]
 
-  // Run parser: prefer binary, fallback to Python
-  const runParser = (binPath, pyScript) => {
+  // Run a parser step: use binary if available, otherwise Python
+  const runStep = (binPath, pyScript, extraArgs = []) => {
     let cmd, args
-    if (binPath && hasBinaries) {
+    if (binPath) {
       cmd = binPath
-      args = [filePath, '--db', DB_PATH]
+      args = [filePath, '--db', DB_PATH, ...extraArgs]
     } else {
       const script = path.join(PYTHON_DIR, pyScript)
       if (process.platform === 'win32' && pythonCmd === 'py') {
         cmd = 'py'
-        args = ['-3', script, filePath, '--db', DB_PATH]
+        args = ['-3', script, filePath, '--db', DB_PATH, ...extraArgs]
       } else {
         cmd = pythonCmd
-        args = [script, filePath, '--db', DB_PATH]
+        args = [script, filePath, '--db', DB_PATH, ...extraArgs]
       }
     }
 
@@ -197,7 +206,7 @@ ipcMain.handle('import:excel', async () => {
       const proc = execFile(cmd, args, {
         timeout: 600000,
         maxBuffer: 10 * 1024 * 1024,
-        env: { ...process.env, DB_PATH },
+        env: { ...process.env, DB_PATH, ...(geminiKey ? { GEMINI_API_KEY: geminiKey } : {}) },
       }, (error, stdout, stderr) => {
         if (error) {
           resolve({ ok: false, error: stderr || error.message })
@@ -221,13 +230,16 @@ ipcMain.handle('import:excel', async () => {
     })
   }
 
-  // Run main parser
-  const mainResult = await runParser(parserBin, 'parser.py')
+  // Step 1: Run main parser (binary or Python)
+  const mainResult = await runStep(parserBin, 'parser.py')
   if (!mainResult.ok) return mainResult
 
-  // Run sheet parser
-  mainWindow.webContents.send('import:progress', '\n[Sheet Parser] Parsing pivot tables...\n')
-  const sheetResult = await runParser(sheetBin, 'sheet_parser.py')
+  // Step 2: Run sheet parser (always Python — it calls Gemini API)
+  mainWindow.webContents.send('import:progress', '\n[Sheet Parser] AI parsing pivot tables...\n')
+  const sheetResult = await runStep(null, 'sheet_parser.py')
+  if (!sheetResult.ok) {
+    mainWindow.webContents.send('import:progress', '\n❌ Sheet parser failed: ' + sheetResult.error)
+  }
 
   return mainResult
 })
